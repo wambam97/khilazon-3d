@@ -8,12 +8,13 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ZOOM_DESKTOP = 28
-const ZOOM_MOBILE  = 14   // 50% of desktop for portrait/mobile
-const DEFAULT_PARAMS = { rotX: 0, rotY: 0, rotZ: 0, gap: 1.2 }
-const ROW_HEIGHT = 7
+const ZOOM_MOBILE  = 14
+const DEFAULT_PARAMS = { rotX: 0, rotY: 0, rotZ: 0, gap: 1.2, leading: 7, size: 1.0 }
 const EASE = 0.18
+const PANEL_W = 240
+const PANEL_H = 360
 
-// ─── Detect portrait/mobile ───────────────────────────────────────────────────
+// ─── Portrait detection ───────────────────────────────────────────────────────
 function useIsPortrait() {
   const [portrait, setPortrait] = useState(
     typeof window !== 'undefined' && window.innerWidth < window.innerHeight
@@ -27,7 +28,7 @@ function useIsPortrait() {
 }
 
 // ─── Letter ───────────────────────────────────────────────────────────────────
-function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, targetRotZ }) {
+function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, targetRotZ, letterScale }) {
   const obj = useLoader(OBJLoader, `/models/${type}.obj`)
   const groupRef = useRef()
   const currentRot = useRef({
@@ -75,7 +76,6 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
         geo.computeVertexNormals()
         geo.computeBoundingBox()
         const localBox = geo.boundingBox
-
         if (alefMetrics) {
           let offsetY = 0
           if (align === 'top') offsetY = localBox.max.y - alefMetrics.top
@@ -90,7 +90,7 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
   }, [obj, align, alefMetrics, material])
 
   return (
-    <group position={position}>
+    <group position={position} scale={[letterScale, letterScale, letterScale]}>
       <group ref={groupRef}>
         <primitive object={processedObj} />
       </group>
@@ -115,7 +115,7 @@ function LetterWidthProbe({ type, onDone }) {
 }
 
 // ─── Letter scene ─────────────────────────────────────────────────────────────
-function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, zoom }) {
+function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, letterScale, zoom }) {
   const { size } = useThree()
   const visibleWidth = size.width / zoom
 
@@ -126,12 +126,12 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, zoom }) {
       let currentWidth = 0
       for (const token of line) {
         if (token === 'space') {
-          const sw = widthCache['space'] ?? gap * 1.5
+          const sw = (widthCache['space'] ?? gap * 1.5) * letterScale
           currentRow.push({ type: 'space', w: sw })
           currentWidth += sw
           continue
         }
-        const w = widthCache[token] ?? gap * 2
+        const w = (widthCache[token] ?? gap * 2) * letterScale
         const needed = currentRow.length === 0 ? w : gap + w
         if (currentRow.length > 0 && currentWidth + needed > visibleWidth * 0.92) {
           result.push(currentRow)
@@ -145,15 +145,15 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, zoom }) {
       result.push(currentRow)
     }
     return result
-  }, [lines, gap, visibleWidth])
+  }, [lines, gap, leading, letterScale, visibleWidth])
 
-  const totalHeight = (allRows.length - 1) * ROW_HEIGHT
+  const totalHeight = (allRows.length - 1) * leading
   const startY = totalHeight / 2
 
   return (
     <>
       {allRows.map((row, rowIndex) => {
-        const y = startY - rowIndex * ROW_HEIGHT
+        const y = startY - rowIndex * leading
         let rowTotalWidth = 0
         row.forEach((tok, i) => { rowTotalWidth += tok.w + (i > 0 ? gap : 0) })
         let curX = rowTotalWidth / 2
@@ -178,6 +178,7 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, zoom }) {
               targetRotX={rotX}
               targetRotY={rotY}
               targetRotZ={rotZ}
+              letterScale={letterScale}
             />
           )
         })
@@ -199,7 +200,7 @@ function Lights() {
 }
 
 // ─── Cube gizmo ───────────────────────────────────────────────────────────────
-function CubeScene({ rotX, rotY, rotZ, onRotate }) {
+function CubeScene({ rotX, rotY, rotZ, onRotate, isDark }) {
   const meshRef = useRef()
   const isDragging = useRef(false)
   const lastMouse = useRef({ x: 0, y: 0 })
@@ -252,47 +253,86 @@ function CubeScene({ rotX, rotY, rotZ, onRotate }) {
 
   return (
     <lineSegments ref={meshRef} geometry={edgesGeo} onPointerDown={handlePointerDown}>
-      <lineBasicMaterial color="#ffffff" />
+      <lineBasicMaterial color={isDark ? '#ffffff' : '#000000'} />
     </lineSegments>
   )
 }
 
-// ─── Glass slider ─────────────────────────────────────────────────────────────
-function GlassSlider({ value, min, max, step = 1, onChange }) {
+// ─── Theme-aware tokens ───────────────────────────────────────────────────────
+// All text/border/bg colours derived from isDark so light mode is fully inverted
+function useThemeTokens(isDark) {
+  return useMemo(() => ({
+    text:        isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.75)',
+    textDim:     isDark ? 'rgba(255,255,255,0.3)'  : 'rgba(0,0,0,0.35)',
+    textFaint:   isDark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.25)',
+    trackBg:     isDark ? 'rgba(255,255,255,0.13)' : 'rgba(0,0,0,0.13)',
+    trackFill:   isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)',
+    thumb:       isDark ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.85)',
+    thumbShadow: isDark ? 'rgba(255,255,255,0.3)'  : 'rgba(0,0,0,0.2)',
+    divider:     isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.09)',
+    btnBg:       isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)',
+    btnBgHover:  isDark ? 'rgba(255,255,255,0.13)' : 'rgba(0,0,0,0.13)',
+    btnBgActive: isDark ? 'rgba(255,255,255,0.2)'  : 'rgba(0,0,0,0.18)',
+    btnBorder:   isDark ? 'rgba(255,255,255,0.1)'  : 'rgba(0,0,0,0.12)',
+    btnText:     isDark ? 'rgba(255,255,255,0.38)' : 'rgba(0,0,0,0.45)',
+    btnTextHov:  isDark ? '#ffffff'                : '#000000',
+    panelBg:     isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.05)',
+    panelBorder: isDark ? 'rgba(255,255,255,0.1)'  : 'rgba(0,0,0,0.12)',
+  }), [isDark])
+}
+
+// ─── Glass slider (theme-aware) ───────────────────────────────────────────────
+function GlassSlider({ value, min, max, step = 1, onChange, tk }) {
   const pct = ((value - min) / (max - min)) * 100
   return (
     <div style={{ position: 'relative', height: 18, display: 'flex', alignItems: 'center', flex: 1 }}>
-      <div style={{ position: 'absolute', left: 0, right: 0, height: 1.5, background: 'rgba(255,255,255,0.15)', borderRadius: 2 }} />
-      <div style={{ position: 'absolute', left: 0, width: `${pct}%`, height: 1.5, background: 'rgba(255,255,255,0.55)', borderRadius: 2 }} />
+      <div style={{ position: 'absolute', left: 0, right: 0, height: 1.5, background: tk.trackBg, borderRadius: 2 }} />
+      <div style={{ position: 'absolute', left: 0, width: `${pct}%`, height: 1.5, background: tk.trackFill, borderRadius: 2 }} />
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(Number(e.target.value))}
         style={{ position: 'absolute', left: 0, right: 0, width: '100%', opacity: 0, cursor: 'pointer', height: 18, margin: 0 }} />
       <div style={{
         position: 'absolute', left: `calc(${pct}% - 7px)`,
         width: 14, height: 14, borderRadius: '50%',
-        background: 'rgba(255,255,255,0.92)',
-        boxShadow: '0 0 6px rgba(255,255,255,0.35)',
+        background: tk.thumb,
+        boxShadow: `0 0 6px ${tk.thumbShadow}`,
         pointerEvents: 'none',
       }} />
     </div>
   )
 }
 
-// ─── Draggable panel — clamped to screen bounds ───────────────────────────────
-const PANEL_W = 290
-const PANEL_H = 260  // approximate panel height for clamping
+// ─── Panel button (theme-aware) ───────────────────────────────────────────────
+function PanelBtn({ onClick, children, active, tk }) {
+  const [h, setH] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setH(true)}
+      onMouseLeave={() => setH(false)}
+      style={{
+        background: active ? tk.btnBgActive : h ? tk.btnBgHover : tk.btnBg,
+        border: `1px solid ${tk.btnBorder}`,
+        color: active || h ? tk.btnTextHov : tk.btnText,
+        padding: '3px 9px', borderRadius: 6,
+        cursor: 'pointer', fontFamily: 'monospace', fontSize: 8,
+        letterSpacing: '0.1em', textTransform: 'uppercase',
+        flexShrink: 0, transition: 'all 0.15s',
+      }}
+    >{children}</button>
+  )
+}
 
+// ─── Draggable panel ──────────────────────────────────────────────────────────
 function DraggablePanel({ children, initialPos }) {
   const dragState = useRef({ dragging: false, ox: 0, oy: 0 })
   const [pos, setPos] = useState(initialPos)
 
-  // Clamp helper
   const clamp = useCallback((x, y) => ({
     x: Math.max(0, Math.min(window.innerWidth - PANEL_W, x)),
     y: Math.max(0, Math.min(window.innerHeight - PANEL_H, y)),
   }), [])
 
-  // Re-clamp on window resize so panel never hides off-screen
   useEffect(() => {
     const onResize = () => setPos(p => clamp(p.x, p.y))
     window.addEventListener('resize', onResize)
@@ -324,27 +364,6 @@ function DraggablePanel({ children, initialPos }) {
   )
 }
 
-// ─── Small UI button ──────────────────────────────────────────────────────────
-function PanelBtn({ onClick, children }) {
-  const base = { background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.38)' }
-  const hover = { background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff' }
-  const [h, setH] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setH(true)}
-      onMouseLeave={() => setH(false)}
-      style={{
-        ...(h ? hover : base),
-        padding: '3px 9px', borderRadius: 6,
-        cursor: 'pointer', fontFamily: 'monospace', fontSize: 8,
-        letterSpacing: '0.1em', textTransform: 'uppercase',
-        flexShrink: 0, transition: 'all 0.15s',
-      }}
-    >{children}</button>
-  )
-}
-
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [lines, setLines] = useState([[]])
@@ -353,8 +372,13 @@ export default function App() {
   const [, forceUpdate] = useState(0)
   const [panelReady, setPanelReady] = useState(false)
   const [initPos, setInitPos] = useState({ x: 0, y: 0 })
+  const [theme, setTheme] = useState('dark')
   const isPortrait = useIsPortrait()
   const zoom = isPortrait ? ZOOM_MOBILE : ZOOM_DESKTOP
+  const glCanvasRef = useRef(null)
+
+  const isDark = theme === 'dark'
+  const tk = useThemeTokens(isDark)
 
   const alefObj = useLoader(OBJLoader, '/models/1.obj')
   useEffect(() => {
@@ -420,43 +444,53 @@ export default function App() {
     }))
   }, [])
 
+  const handlePrint = useCallback(() => {
+    const canvas = glCanvasRef.current
+    if (!canvas) return
+    try {
+      const dataURL = canvas.toDataURL('image/png')
+      const win = window.open('', '_blank')
+      if (!win) return
+      win.document.write(`<!DOCTYPE html><html><head><title>Snapshot</title>
+        <style>*{margin:0;padding:0}html,body{background:transparent;width:100%;height:100%}
+        img{display:block;width:100vw;height:100vh;object-fit:contain}</style></head>
+        <body><img src="${dataURL}"/></body></html>`)
+      win.document.close()
+    } catch (e) { console.error('Snapshot failed:', e) }
+  }, [])
+
+  const bgColor = isDark ? '#000' : '#fff'
+  const gridFilter = isDark ? 'none' : 'invert(1)'
+  // Canvas is never inverted — letters are always black, bg is transparent
+  const canvasFilter = 'none'
+
+  // Shared label style
+  const labelStyle = {
+    color: tk.textFaint, fontFamily: 'monospace', fontSize: 9,
+    letterSpacing: '0.1em', textTransform: 'uppercase', flexShrink: 0, width: 38,
+  }
+
+  // Shared value style
+  const valStyle = { color: tk.text, fontFamily: 'monospace', fontSize: 11 }
+
   return (
     <>
-      {/* Inject global style to kill any scroll/overflow at html+body level */}
       <style>{`
-        html, body, #root {
-          margin: 0; padding: 0;
-          width: 100%; height: 100%;
-          overflow: hidden;
-          background: #000;
-        }
+        html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:${bgColor}; }
       `}</style>
 
-      <div style={{
-        position: 'fixed',       /* fixed instead of relative — anchors to viewport exactly */
-        top: 0, left: 0,
-        width: '100%',           /* 100% of viewport, not 100vw which can include scrollbar */
-        height: '100%',
-        background: '#000',
-        overflow: 'hidden',
-      }}>
+      <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: bgColor, overflow: 'hidden', transition: 'background 0.3s' }}>
 
-        {/* SVG grid — 100vh tall, width stretches to fill screen width */}
-        <img src="/grid.svg" alt=""
-          style={{
-            position: 'absolute', top: 0, left: 0,
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            pointerEvents: 'none', zIndex: 0,
-          }}
-        />
+        <img src="/grid.svg" alt="" style={{
+          position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+          objectFit: 'fill', pointerEvents: 'none', zIndex: 0,
+          filter: gridFilter, transition: 'filter 0.3s',
+        }} />
 
-        {/* 3D canvas */}
         <Canvas
-          style={{ position: 'absolute', inset: 0, zIndex: 1 }}
-          gl={{ alpha: true }}
-          onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+          style={{ position: 'absolute', inset: 0, zIndex: 1, filter: canvasFilter, transition: 'filter 0.3s' }}
+          gl={{ alpha: true, preserveDrawingBuffer: true }}
+          onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
           <DreiOrtho makeDefault position={[0, 0, 100]} zoom={zoom} />
           <Suspense fallback={null}>
@@ -464,10 +498,9 @@ export default function App() {
               <LetterWidthProbe key={type} type={type} onDone={handleWidthDone} />
             ))}
             <LetterScene
-              lines={lines}
-              alefMetrics={alefMetrics}
+              lines={lines} alefMetrics={alefMetrics}
               rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ}
-              gap={params.gap}
+              gap={params.gap} leading={params.leading} letterScale={params.size}
               zoom={zoom}
             />
             <Lights />
@@ -478,63 +511,89 @@ export default function App() {
           </EffectComposer>
         </Canvas>
 
-        {/* Draggable panel */}
         {panelReady && (
           <DraggablePanel initialPos={initPos}>
             <div style={{
               width: PANEL_W,
-              background: 'rgba(255,255,255,0.04)',
+              background: tk.panelBg,
               backdropFilter: 'blur(20px) saturate(140%)',
               WebkitBackdropFilter: 'blur(20px) saturate(140%)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: 20,
-              padding: '16px 18px 14px',
-              boxShadow: '0 8px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07)',
+              border: `1px solid ${tk.panelBorder}`,
+              borderRadius: 20, padding: '14px 16px 12px',
+              boxShadow: '0 8px 40px rgba(0,0,0,0.35)',
               position: 'relative', zIndex: 10,
+              transition: 'background 0.3s, border-color 0.3s',
             }}>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 18, marginBottom: 16 }} data-nodrag>
-                {['rotX', 'rotY', 'rotZ'].map(key => (
-                  <GlassSlider key={key} value={params[key]} min={-180} max={180} onChange={set(key)} />
-                ))}
+              {/* ── All sliders unified: rotX/Y/Z then divider then gap/lead/size ── */}
+              {/* Same gap=12 throughout */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} data-nodrag>
+                <GlassSlider value={params.rotX} min={-180} max={180} onChange={set('rotX')} tk={tk} />
+                <GlassSlider value={params.rotY} min={-180} max={180} onChange={set('rotY')} tk={tk} />
+                <GlassSlider value={params.rotZ} min={-180} max={180} onChange={set('rotZ')} tk={tk} />
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'stretch', gap: 12 }}>
-                <div style={{ flex: 1, minWidth: 0 }} data-nodrag>
+              {/* ── XYZ readouts (left) + Cube (right) ── */}
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 28 }}>
+                <div style={{ flex: 1 }} data-nodrag>
                   {[['X', 'rotX'], ['Y', 'rotY'], ['Z', 'rotZ']].map(([label, key]) => (
-                    <div key={key} style={{ display: 'flex', gap: 10, alignItems: 'baseline', marginBottom: 5 }}>
-                      <span style={{ width: 12, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', fontSize: 11 }}>{label}</span>
-                      <span style={{ color: 'rgba(255,255,255,0.75)', fontFamily: 'monospace', fontSize: 11 }}>{params[key]}°</span>
+                    <div key={key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 0 }}>
+                      <span style={{ width: 12, ...valStyle, color: tk.textDim, fontSize: 10 }}>{label}</span>
+                      <span style={{ ...valStyle, fontSize: 10 }}>{params[key]}°</span>
                     </div>
                   ))}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 10, paddingTop: 9, borderTop: '1px solid rgba(255,255,255,0.07)', flexWrap: 'nowrap' }}>
-                    <span style={{ color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', flexShrink: 0 }}>Gap</span>
-                    <GlassSlider value={params.gap} min={0} max={6} step={0.05} onChange={set('gap')} />
-                    <span style={{ color: 'rgba(255,255,255,0.38)', fontFamily: 'monospace', fontSize: 9, flexShrink: 0, width: 22, textAlign: 'right' }}>{params.gap.toFixed(1)}</span>
-                    {/* Reset params */}
-                    <PanelBtn onClick={() => setParams(DEFAULT_PARAMS)}>Reset</PanelBtn>
-                    {/* Clear text */}
-                    <PanelBtn onClick={() => setLines([[]])}>Clear</PanelBtn>
-                  </div>
                 </div>
-
-                {/* Cube */}
-                <div data-nodrag style={{ flexShrink: 0, width: 72, height: 72, position: 'relative', alignSelf: 'center' }}>
+                {/* Cube — same level as XYZ values */}
+                <div data-nodrag style={{ flexShrink: 0, width: 100, height: 80, position: 'relative' }}>
                   <Canvas
                     style={{
                       position: 'absolute', top: '50%', left: '50%',
                       transform: 'translate(-50%, -50%)',
-                      width: 150, height: 150,
+                      width: 130, height: 130,
                       background: 'transparent', cursor: 'grab',
                     }}
                     gl={{ alpha: true }}
                     orthographic
                     camera={{ zoom: 55, position: [0, 0, 10], near: 0.1, far: 100 }}
                   >
-                    <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} />
+                    <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} isDark={isDark} />
                   </Canvas>
                 </div>
               </div>
+
+              {/* ── Typography sliders — same gap=12 as rotation sliders ── */}
+              <div style={{ borderTop: `1px solid ${tk.divider}`, paddingTop: 12, marginTop: 28, display: 'flex', flexDirection: 'column', gap: 0 }} data-nodrag>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={labelStyle}>Gap</span>
+                  <GlassSlider value={params.gap} min={0} max={6} step={0.05} onChange={set('gap')} tk={tk} />
+                  <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.gap.toFixed(1)}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={labelStyle}>Lead</span>
+                  <GlassSlider value={params.leading} min={4} max={20} step={0.1} onChange={set('leading')} tk={tk} />
+                  <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.leading.toFixed(1)}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={labelStyle}>Size</span>
+                  <GlassSlider value={params.size} min={0.5} max={1.5} step={0.01} onChange={set('size')} tk={tk} />
+                </div>
+              </div>
+
+              {/* ── Actions: Reset / Clear / spacer / Print ── */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
+                <PanelBtn onClick={() => setParams(DEFAULT_PARAMS)} tk={tk}>Reset</PanelBtn>
+                <PanelBtn onClick={() => setLines([[]])} tk={tk}>Clear</PanelBtn>
+                <div style={{ flex: 1 }} />
+                <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
+              </div>
+
+              {/* ── Theme ── */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 7 }} data-nodrag>
+                <span style={{ ...labelStyle, width: 'auto', marginRight: 2 }}>Theme</span>
+                <PanelBtn onClick={() => setTheme('dark')} active={theme === 'dark'} tk={tk}>Dark</PanelBtn>
+                <PanelBtn onClick={() => setTheme('light')} active={theme === 'light'} tk={tk}>Light</PanelBtn>
+              </div>
+
             </div>
           </DraggablePanel>
         )}
