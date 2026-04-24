@@ -483,7 +483,7 @@ export default function App() {
 
         <img src="/grid.svg" alt="" style={{
           position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-          objectFit: 'fill', pointerEvents: 'none', zIndex: 0,
+          objectFit: 'cover', pointerEvents: 'none', zIndex: 0,
           filter: gridFilter, transition: 'filter 0.3s',
         }} />
 
