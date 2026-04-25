@@ -910,7 +910,7 @@ export default function App() {
                 border: collapsed ? 'none' : `1px solid ${tk.panelBorder}`,
                 borderRadius: 20,
                 padding: collapsed ? 0 : '14px 16px 12px',
-                boxShadow: collapsed ? 'none' : '0 8px 40px rgba(0,0,0,0.35)',
+                // boxShadow: collapsed ? 'none' : '0 8px 40px rgba(0,0,0,0.35)',
                 overflow: 'hidden',
                 maxHeight: collapsed ? 0 : 600,
                 transition: 'max-height 0.3s ease, padding 0.3s ease, width 0.3s ease, background 0.3s, border-color 0.3s, box-shadow 0.3s',
