@@ -12,7 +12,14 @@ const ZOOM_MOBILE  = 14
 const DEFAULT_PARAMS = { rotX: 0, rotY: 0, rotZ: 0, gap: 1.2, leading: 7, size: 1.0 }
 const EASE = 0.18
 const PANEL_W = 240
-const PANEL_H = 360
+const PANEL_H = 380
+
+// Reverse map: model id → Hebrew character (for print footer)
+const MODEL_TO_CHAR = {
+  '1':'א','2':'ב','3':'ג','4':'ד','5':'ה','6':'ו','7':'ז','8':'ח','9':'ט','10':'י',
+  '20':'כ','21':'ך','30':'ל','40':'מ','41':'ם','50':'נ','51':'ן','60':'ס','70':'ע',
+  '80':'פ','81':'ף','90':'צ','91':'ץ','100':'ק','200':'ר','300':'ש','400':'ת',
+}
 
 // ─── Portrait detection ───────────────────────────────────────────────────────
 function useIsPortrait() {
@@ -36,14 +43,18 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
     y: targetRotY * Math.PI / 180,
     z: targetRotZ * Math.PI / 180,
   })
+  const { invalidate } = useThree()
 
   useFrame(() => {
     const tx = targetRotX * Math.PI / 180
     const ty = targetRotY * Math.PI / 180
     const tz = targetRotZ * Math.PI / 180
-    currentRot.current.x += (tx - currentRot.current.x) * EASE
-    currentRot.current.y += (ty - currentRot.current.y) * EASE
-    currentRot.current.z += (tz - currentRot.current.z) * EASE
+    const dx = tx - currentRot.current.x
+    const dy = ty - currentRot.current.y
+    const dz = tz - currentRot.current.z
+    currentRot.current.x += dx * EASE
+    currentRot.current.y += dy * EASE
+    currentRot.current.z += dz * EASE
     if (groupRef.current) {
       groupRef.current.rotation.set(
         currentRot.current.x,
@@ -51,6 +62,7 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
         currentRot.current.z
       )
     }
+    if (Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001 || Math.abs(dz) > 0.0001) invalidate()
   })
 
   const material = useMemo(() => new THREE.MeshStandardMaterial({
@@ -115,7 +127,7 @@ function LetterWidthProbe({ type, onDone }) {
 }
 
 // ─── Letter scene ─────────────────────────────────────────────────────────────
-function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, letterScale, zoom }) {
+function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, letterScale, zoom, textAlign }) {
   const { size } = useThree()
   const visibleWidth = size.width / zoom
 
@@ -149,19 +161,52 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, lette
 
   const totalHeight = (allRows.length - 1) * leading
   const startY = totalHeight / 2
+  const maxW = visibleWidth * 0.92
 
   return (
     <>
       {allRows.map((row, rowIndex) => {
         const y = startY - rowIndex * leading
+
+        // Natural row width
         let rowTotalWidth = 0
         row.forEach((tok, i) => { rowTotalWidth += tok.w + (i > 0 ? gap : 0) })
-        let curX = rowTotalWidth / 2
+
+        // For justify: spread letters to fill maxW by expanding gaps
+        const isLastRow = rowIndex === allRows.length - 1
+        let effectiveGap = gap
+        if (textAlign === 'justify' && !isLastRow && row.length > 1) {
+          const extraSpace = maxW - rowTotalWidth
+          effectiveGap = gap + extraSpace / (row.length - 1)
+        }
+
+        // Compute start X based on alignment
+        // Hebrew RTL: letters placed right→left from startX
+        // "left" visually = first letter at screen-left = startX at left edge, curX goes further left → not possible
+        // RTL layout: curX starts positive and decrements. Visual left = small positive startX. Visual right = large startX.
+        let startX
+        if (textAlign === 'right') {
+          // Flush right: row starts at right edge (maxW/2), natural RTL direction
+          startX = maxW / 2
+        } else if (textAlign === 'left') {
+          // Flush left: row ends at left edge (-maxW/2), so startX = -maxW/2 + rowTotalWidth
+          startX = -maxW / 2 + rowTotalWidth
+        } else {
+          // center or justify: centered
+          startX = rowTotalWidth / 2
+          if (textAlign === 'justify' && !isLastRow && row.length > 1) {
+            let jWidth = 0
+            row.forEach((tok, i) => { jWidth += tok.w + (i > 0 ? effectiveGap : 0) })
+            startX = jWidth / 2
+          }
+        }
+
+        let curX = startX
 
         return row.map((tok, colIndex) => {
           const hw = tok.w / 2
           const x = curX - hw
-          curX = curX - tok.w - gap
+          curX = curX - tok.w - effectiveGap
           if (tok.type === 'space') return <group key={`${rowIndex}-${colIndex}`} position={[x, y, 0]} />
           const topAligned = ['2','3','4','5','6','7','8','9','10','20','21','50','51','60','80','81','91','100','200','300','400']
           const bottomAligned = ['30','40','41','70','90']
@@ -189,10 +234,12 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, lette
 
 // ─── Shared mouse position ────────────────────────────────────────────────────
 const mouseNorm = { x: 0, y: 0 }
+let sphereInvalidate = null
 if (typeof window !== 'undefined') {
   window.addEventListener('mousemove', (e) => {
     mouseNorm.x = (e.clientX / window.innerWidth)  * 2 - 1
     mouseNorm.y = (e.clientY / window.innerHeight) * 2 - 1
+    sphereInvalidate?.()
   }, { passive: true })
 }
 
@@ -229,22 +276,31 @@ function SphereWireframe({ isDark }) {
   const groupRef = useRef()
   const curY = useRef(0)
   const curX = useRef(0)
+  const { invalidate } = useThree()
   const geo = useMemo(() => buildSphereEdgeGeo(32, 24, 16), [])
   const mat = useMemo(() => new THREE.LineBasicMaterial({
     color: isDark ? '#ffffff' : '#000000',
     transparent: true,
-    opacity: isDark ? 0.12 : 0.09,
+    opacity: isDark ? 0.28 : 0.18,
   }), [isDark])
+
+  useEffect(() => {
+    sphereInvalidate = invalidate
+    return () => { sphereInvalidate = null }
+  }, [invalidate])
 
   useFrame(() => {
     const tY = -mouseNorm.x * (5 * Math.PI / 180)
     const tX =  mouseNorm.y * (2.5 * Math.PI / 180)
-    curY.current += (tY - curY.current) * 0.022
-    curX.current += (tX - curX.current) * 0.022
+    const dy = tY - curY.current
+    const dx = tX - curX.current
+    curY.current += dy * 0.022
+    curX.current += dx * 0.022
     if (groupRef.current) {
       groupRef.current.rotation.y = curY.current
       groupRef.current.rotation.x = curX.current
     }
+    if (Math.abs(dy) > 0.00005 || Math.abs(dx) > 0.00005) invalidate()
   })
 
   return (
@@ -257,14 +313,23 @@ function SphereWireframe({ isDark }) {
 function SphereCanvas({ isDark }) {
   return (
     <Canvas
+      frameloop="demand"
+      dpr={[1, 1.5]}
       style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
-      gl={{ alpha: true, antialias: true }}
+      gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
       onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
       camera={{ position: [0, 0, 0.001], fov: 75, near: 0.1, far: 300 }}
     >
       <SphereWireframe isDark={isDark} />
     </Canvas>
   )
+}
+
+// ─── Invalidator — triggers a render burst when params change ─────────────────
+function Invalidator({ rotX, rotY, rotZ }) {
+  const { invalidate } = useThree()
+  useEffect(() => { invalidate() }, [rotX, rotY, rotZ, invalidate])
+  return null
 }
 
 // ─── Lights ───────────────────────────────────────────────────────────────────
@@ -471,9 +536,11 @@ export default function App() {
   const [initPos, setInitPos] = useState({ x: 0, y: 0 })
   const [theme, setTheme] = useState('dark')
   const [collapsed, setCollapsed] = useState(false)
+  const [textAlign, setTextAlign] = useState('center')
   const isPortrait = useIsPortrait()
   const zoom = isPortrait ? ZOOM_MOBILE : ZOOM_DESKTOP
   const glCanvasRef = useRef(null)
+  const mobileInputRef = useRef(null)
 
   const isDark = theme === 'dark'
   const tk = useThemeTokens(isDark)
@@ -531,6 +598,25 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
+  const handleMobileInput = useCallback((e) => {
+    const keyMap = {
+      'א': '1','ב': '2','ג': '3','ד': '4','ה': '5','ו': '6','ז': '7','ח': '8','ט': '9','י': '10',
+      'כ': '20','ך': '21','ל': '30','מ': '40','ם': '41','נ': '50','ן': '51','ס': '60','ע': '70',
+      'פ': '80','ף': '81','צ': '90','ץ': '91','ק': '100','ר': '200','ש': '300','ת': '400'
+    }
+    const val = e.target.value
+    if (!val) return
+    const last = val[val.length - 1]
+    if (keyMap[last]) {
+      setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push(keyMap[last]); return n })
+    } else if (last === ' ') {
+      setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push('space'); return n })
+    } else if (last === '\n') {
+      setLines(prev => [...prev, []])
+    }
+    e.target.value = ''
+  }, [])
+
   const set = key => val => setParams(p => ({ ...p, [key]: val }))
 
   const handleCubeRotate = useCallback(({ x, y, z }) => {
@@ -543,19 +629,85 @@ export default function App() {
   }, [])
 
   const handlePrint = useCallback(() => {
-    const canvas = glCanvasRef.current
-    if (!canvas) return
+    const glCanvas = glCanvasRef.current
+    if (!glCanvas) return
     try {
-      const dataURL = canvas.toDataURL('image/png')
+      const W = glCanvas.width
+      const H = glCanvas.height
+      const FOOTER = Math.round(H * 0.07)      // footer = 7% of canvas height
+      const PAD_X  = Math.round(W * 0.03)      // horizontal padding ~3% of width
+      const PAD_Y  = Math.round(FOOTER * 0.18) // top padding inside footer
+      const FS     = Math.max(11, Math.round(H * 0.013)) // font size — small & elegant
+      const LINE_H = Math.round(FS * 1.55)
+
+      const out = document.createElement('canvas')
+      out.width  = W
+      out.height = H + FOOTER
+      const ctx = out.getContext('2d')
+
+      // Fully transparent background
+      ctx.clearRect(0, 0, W, H + FOOTER)
+
+      // Draw the WebGL snapshot (letters only, bg was already transparent)
+      ctx.drawImage(glCanvas, 0, 0)
+
+      // Footer divider — thin, subtle
+      const lineColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'
+      ctx.strokeStyle = lineColor
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(PAD_X, H + 0.5)
+      ctx.lineTo(W - PAD_X, H + 0.5)
+      ctx.stroke()
+
+      // Text colours
+      const textColor = isDark ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.72)'
+      const dimColor  = isDark ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.32)'
+
+      ctx.textBaseline = 'top'
+      ctx.font = `${FS}px monospace`
+
+      // ── Left block: 3 rows top-aligned  ──────────────────────────────────────
+      // Layout: "X  43   GAP  1.2"  each on its own row
+      const labelW = FS * 2.8   // fixed label column width
+      const valW   = FS * 4.2   // fixed value column width
+
+      const rows = [
+        { l1: 'X', v1: `${params.rotX}°`, l2: 'GAP',  v2: params.gap.toFixed(1)  },
+        { l1: 'Y', v1: `${params.rotY}°`, l2: 'LEAD', v2: params.leading.toFixed(1) },
+        { l1: 'Z', v1: `${params.rotZ}°`, l2: 'SIZE', v2: Math.round(params.size * 100).toString() },
+      ]
+
+      rows.forEach(({ l1, v1, l2, v2 }, i) => {
+        const y = H + PAD_Y + i * LINE_H
+        ctx.fillStyle = dimColor;  ctx.fillText(l1, PAD_X, y)
+        ctx.fillStyle = textColor; ctx.fillText(v1, PAD_X + labelW, y)
+        ctx.fillStyle = dimColor;  ctx.fillText(l2, PAD_X + labelW + valW, y)
+        ctx.fillStyle = textColor; ctx.fillText(v2, PAD_X + labelW + valW + labelW, y)
+      })
+
+      // ── Right block: Hebrew text — top-aligned, right edge ────────────────────
+      const hebrewStr = lines
+        .map(line => line.map(t => t === 'space' ? ' ' : (MODEL_TO_CHAR[t] ?? '')).join(''))
+        .join(' ')
+        .trim()
+
+      ctx.fillStyle = textColor
+      ctx.textAlign = 'right'
+      ctx.fillText(hebrewStr, W - PAD_X, H + PAD_Y)
+      ctx.textAlign = 'left'
+
+      // Export as PNG with transparency
+      const dataURL = out.toDataURL('image/png')
       const win = window.open('', '_blank')
       if (!win) return
       win.document.write(`<!DOCTYPE html><html><head><title>Snapshot</title>
         <style>*{margin:0;padding:0}html,body{background:transparent;width:100%;height:100%}
-        img{display:block;width:100vw;height:100vh;object-fit:contain}</style></head>
+        img{display:block;width:100%;height:auto}</style></head>
         <body><img src="${dataURL}"/></body></html>`)
       win.document.close()
     } catch (e) { console.error('Snapshot failed:', e) }
-  }, [])
+  }, [glCanvasRef, params, lines, isDark])
 
   const bgColor = isDark ? '#000' : '#fff'
   const arrowColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'
@@ -580,13 +732,53 @@ export default function App() {
         {/* Wireframe sphere background */}
         <SphereCanvas isDark={isDark} />
 
+        {/* Mobile: hidden input to trigger keyboard on tap */}
+        {isPortrait && (
+          <input
+            ref={mobileInputRef}
+            onInput={handleMobileInput}
+            style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1, top: 0, left: 0 }}
+            type="text" autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck="false"
+          />
+        )}
+
+        {/* Tap-to-type hint — portrait only */}
+        {isPortrait && (
+          <div
+            onClick={() => mobileInputRef.current?.focus()}
+            style={{
+              position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)',
+              zIndex: 5, display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 14px', borderRadius: 20,
+              background: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)',
+              border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`,
+              backdropFilter: 'blur(10px)', cursor: 'text', pointerEvents: 'auto',
+            }}
+          >
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
+              <rect x="0.5" y="0.5" width="13" height="9" rx="1.5" stroke={arrowColor} strokeWidth="1"/>
+              <rect x="2" y="2.5" width="1.5" height="1.5" rx="0.4" fill={arrowColor}/>
+              <rect x="4.5" y="2.5" width="1.5" height="1.5" rx="0.4" fill={arrowColor}/>
+              <rect x="7" y="2.5" width="1.5" height="1.5" rx="0.4" fill={arrowColor}/>
+              <rect x="9.5" y="2.5" width="1.5" height="1.5" rx="0.4" fill={arrowColor}/>
+              <rect x="3" y="5.5" width="8" height="1.5" rx="0.4" fill={arrowColor}/>
+            </svg>
+            <span style={{ fontFamily: 'monospace', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: arrowColor }}>
+              Tap to type
+            </span>
+          </div>
+        )}
+
         <Canvas
+          frameloop="demand"
+          dpr={[1, 1.5]}
           style={{ position: 'absolute', inset: 0, zIndex: 1 }}
-          gl={{ alpha: true, preserveDrawingBuffer: true }}
+          gl={{ alpha: true, preserveDrawingBuffer: true, antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
           <DreiOrtho makeDefault position={[0, 0, 100]} zoom={zoom} />
           <Suspense fallback={null}>
+            <Invalidator rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} />
             {allTokenTypes.map(type => (
               <LetterWidthProbe key={type} type={type} onDone={handleWidthDone} />
             ))}
@@ -594,7 +786,7 @@ export default function App() {
               lines={lines} alefMetrics={alefMetrics}
               rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ}
               gap={params.gap} leading={params.leading} letterScale={params.size}
-              zoom={zoom}
+              zoom={zoom} textAlign={textAlign}
             />
             <Lights />
             <Environment preset="studio" background={false} />
@@ -624,8 +816,8 @@ export default function App() {
                   backdropFilter: 'blur(20px)',
                   WebkitBackdropFilter: 'blur(20px)',
                   border: `1px solid ${tk.panelBorder}`,
-                  borderRight: 'none',  // merges with slab
-                  borderRadius: '8px 0 0 8px',
+                  borderRight: collapsed ? `1px solid ${tk.panelBorder}` : 'none',
+                  borderRadius: collapsed ? '8px' : '8px 0 0 8px',
                   cursor: 'pointer',
                   userSelect: 'none',
                   zIndex: 11,
@@ -708,10 +900,65 @@ export default function App() {
                     <span style={labelStyle}>Size</span>
                     <GlassSlider value={params.size} min={0.5} max={1.5} step={0.01} onChange={set('size')} tk={tk} />
                   </div>
+
+                  {/* Alignment buttons */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 10 }}>
+                    <span style={labelStyle}>Align</span>
+                    <div style={{ display: 'flex', gap: 4 }} data-nodrag>
+                      {[
+                        { id: 'left', icon: (
+                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+                          </svg>
+                        )},
+                        { id: 'center', icon: (
+                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="2" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="1" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="3" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+                          </svg>
+                        )},
+                        { id: 'right', icon: (
+                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="4" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="2" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="6" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+                          </svg>
+                        )},
+                        { id: 'justify', icon: (
+                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="3" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="6" width="12" height="1.5" rx="0.75" fill="currentColor"/>
+                            <rect x="0" y="9" width="7" height="1.5" rx="0.75" fill="currentColor"/>
+                          </svg>
+                        )},
+                      ].map(({ id, icon }) => (
+                        <button
+                          key={id}
+                          onClick={() => setTextAlign(id)}
+                          style={{
+                            width: 28, height: 24,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            background: textAlign === id ? tk.btnBgActive : tk.btnBg,
+                            border: `1px solid ${tk.btnBorder}`,
+                            borderRadius: 5, cursor: 'pointer',
+                            color: textAlign === id ? tk.btnTextHov : tk.btnText,
+                            transition: 'all 0.15s', padding: 0,
+                          }}
+                        >{icon}</button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
-                  <PanelBtn onClick={() => setParams(DEFAULT_PARAMS)} tk={tk}>Reset</PanelBtn>
+                  <PanelBtn onClick={() => { setParams(DEFAULT_PARAMS); setTextAlign('center') }} tk={tk}>Reset</PanelBtn>
                   <PanelBtn onClick={() => setLines([[]])} tk={tk}>Clear</PanelBtn>
                   <div style={{ flex: 1 }} />
                   <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
