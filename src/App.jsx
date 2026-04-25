@@ -315,7 +315,14 @@ function SphereCanvas({ isDark }) {
     <Canvas
       frameloop="demand"
       dpr={[1, 1.5]}
-      style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
+      style={{
+        position: 'absolute',
+        // Bleed 60px top and bottom beyond the container so it's visible
+        // behind Safari's notch and address bar
+        top: -60, bottom: -60, left: 0, right: 0,
+        height: 'calc(100% + 120px)',
+        zIndex: 0, pointerEvents: 'none',
+      }}
       gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
       onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
       camera={{ position: [0, 0, 0.001], fov: 75, near: 0.1, far: 300 }}
@@ -537,6 +544,7 @@ export default function App() {
   const [theme, setTheme] = useState('dark')
   const [collapsed, setCollapsed] = useState(false)
   const [textAlign, setTextAlign] = useState('center')
+  const [hasTyped, setHasTyped] = useState(false)
   const isPortrait = useIsPortrait()
   const zoom = isPortrait ? ZOOM_MOBILE : ZOOM_DESKTOP
   const glCanvasRef = useRef(null)
@@ -578,8 +586,18 @@ export default function App() {
     }
     const handleKeyDown = (e) => {
       if (e.key === 'Enter') {
-        setLines(prev => [...prev, []])
+        setHasTyped(true)
+        setLines(prev => {
+          const n = prev.map(l => [...l])
+          // Strip trailing space from current line before breaking
+          const last = n[n.length - 1]
+          if (last.length > 0 && last[last.length - 1] === 'space') {
+            n[n.length - 1] = last.slice(0, -1)
+          }
+          return [...n, []]
+        })
       } else if (keyMap[e.key]) {
+        setHasTyped(true)
         setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push(keyMap[e.key]); return n })
       } else if (e.key === ' ') {
         e.preventDefault()
@@ -608,11 +626,18 @@ export default function App() {
     if (!val) return
     const last = val[val.length - 1]
     if (keyMap[last]) {
+      setHasTyped(true)
       setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push(keyMap[last]); return n })
     } else if (last === ' ') {
       setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push('space'); return n })
     } else if (last === '\n') {
-      setLines(prev => [...prev, []])
+      setHasTyped(true)
+      setLines(prev => {
+        const n = prev.map(l => [...l])
+        const line = n[n.length - 1]
+        if (line.length > 0 && line[line.length - 1] === 'space') n[n.length - 1] = line.slice(0, -1)
+        return [...n, []]
+      })
     }
     e.target.value = ''
   }, [])
@@ -634,80 +659,83 @@ export default function App() {
     try {
       const W = glCanvas.width
       const H = glCanvas.height
-      const FOOTER = Math.round(H * 0.07)      // footer = 7% of canvas height
-      const PAD_X  = Math.round(W * 0.03)      // horizontal padding ~3% of width
-      const PAD_Y  = Math.round(FOOTER * 0.18) // top padding inside footer
-      const FS     = Math.max(11, Math.round(H * 0.013)) // font size — small & elegant
-      const LINE_H = Math.round(FS * 1.55)
+
+      // Footer proportions
+      const FS      = Math.max(11, Math.round(H * 0.013))
+      const LINE_H  = Math.round(FS * 1.6)
+      const ROWS    = 3
+      const PAD_X   = Math.round(W * 0.03)
+      const PAD_V   = Math.round(FS * 1.2)   // equal top AND bottom
+      const FOOTER  = ROWS * LINE_H + PAD_V * 2
 
       const out = document.createElement('canvas')
       out.width  = W
       out.height = H + FOOTER
-      const ctx = out.getContext('2d')
+      const ctx  = out.getContext('2d')
 
-      // Fully transparent background
       ctx.clearRect(0, 0, W, H + FOOTER)
-
-      // Draw the WebGL snapshot (letters only, bg was already transparent)
       ctx.drawImage(glCanvas, 0, 0)
 
-      // Footer divider — thin, subtle
-      const lineColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'
-      ctx.strokeStyle = lineColor
+      // Divider
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)'
       ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(PAD_X, H + 0.5)
-      ctx.lineTo(W - PAD_X, H + 0.5)
-      ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(PAD_X, H + 0.5); ctx.lineTo(W - PAD_X, H + 0.5); ctx.stroke()
 
-      // Text colours
-      const textColor = isDark ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.72)'
-      const dimColor  = isDark ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.32)'
+      const textColor = 'rgba(0,0,0,0.75)'
+      const dimColor  = 'rgba(0,0,0,0.32)'
 
+      // Values use the same monospace as the UI
+      const valueFontSpec = `${FS}px monospace`
+      ctx.font = valueFontSpec
       ctx.textBaseline = 'top'
-      ctx.font = `${FS}px monospace`
 
-      // ── Left block: 3 rows top-aligned  ──────────────────────────────────────
-      // Layout: "X  43   GAP  1.2"  each on its own row
-      const labelW = FS * 2.8   // fixed label column width
-      const valW   = FS * 4.2   // fixed value column width
+      // Measure one representative char to build fixed-width columns
+      const CW = ctx.measureText('0').width  // digit width in current font
+
+      // Column layout — same as the reference screenshot
+      // Label col: 2 chars wide,  value col: 6 chars wide, gap between groups: 2 chars
+      const C_L1  = PAD_X                        // axis label  "X"
+      const C_V1  = C_L1 + CW * 3               // axis value  "-42°"
+      const C_L2  = C_V1 + CW * 7               // typo label  "GAP"
+      const C_V2  = C_L2 + CW * 5               // typo value  "1.0"
 
       const rows = [
-        { l1: 'X', v1: `${params.rotX}°`, l2: 'GAP',  v2: params.gap.toFixed(1)  },
+        { l1: 'X', v1: `${params.rotX}°`, l2: 'GAP',  v2: params.gap.toFixed(1) },
         { l1: 'Y', v1: `${params.rotY}°`, l2: 'LEAD', v2: params.leading.toFixed(1) },
         { l1: 'Z', v1: `${params.rotZ}°`, l2: 'SIZE', v2: Math.round(params.size * 100).toString() },
       ]
 
       rows.forEach(({ l1, v1, l2, v2 }, i) => {
-        const y = H + PAD_Y + i * LINE_H
-        ctx.fillStyle = dimColor;  ctx.fillText(l1, PAD_X, y)
-        ctx.fillStyle = textColor; ctx.fillText(v1, PAD_X + labelW, y)
-        ctx.fillStyle = dimColor;  ctx.fillText(l2, PAD_X + labelW + valW, y)
-        ctx.fillStyle = textColor; ctx.fillText(v2, PAD_X + labelW + valW + labelW, y)
+        const y = H + PAD_V + i * LINE_H
+        ctx.font = valueFontSpec
+        ctx.fillStyle = dimColor;  ctx.fillText(l1, C_L1, y)
+        ctx.fillStyle = textColor; ctx.fillText(v1, C_V1, y)
+        ctx.fillStyle = dimColor;  ctx.fillText(l2, C_L2, y)
+        ctx.fillStyle = textColor; ctx.fillText(v2, C_V2, y)
       })
 
-      // ── Right block: Hebrew text — top-aligned, right edge ────────────────────
+      // Hebrew text — Cascadia Mono, same size, top-aligned to first row, right edge
       const hebrewStr = lines
         .map(line => line.map(t => t === 'space' ? ' ' : (MODEL_TO_CHAR[t] ?? '')).join(''))
         .join(' ')
         .trim()
 
+      ctx.font = `${FS}px "Cascadia Mono", "Cascadia Code", ui-monospace, SFMono-Regular, monospace`
       ctx.fillStyle = textColor
       ctx.textAlign = 'right'
-      ctx.fillText(hebrewStr, W - PAD_X, H + PAD_Y)
+      ctx.fillText(hebrewStr, W - PAD_X, H + PAD_V)
       ctx.textAlign = 'left'
 
-      // Export as PNG with transparency
       const dataURL = out.toDataURL('image/png')
       const win = window.open('', '_blank')
       if (!win) return
       win.document.write(`<!DOCTYPE html><html><head><title>Snapshot</title>
-        <style>*{margin:0;padding:0}html,body{background:transparent;width:100%;height:100%}
+        <style>*{margin:0;padding:0}html,body{background:#fff;width:100%;height:100%}
         img{display:block;width:100%;height:auto}</style></head>
         <body><img src="${dataURL}"/></body></html>`)
       win.document.close()
     } catch (e) { console.error('Snapshot failed:', e) }
-  }, [glCanvasRef, params, lines, isDark])
+  }, [glCanvasRef, params, lines])
 
   const bgColor = isDark ? '#000' : '#fff'
   const arrowColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'
@@ -725,12 +753,44 @@ export default function App() {
     <>
       <style>{`
         html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:${bgColor}; }
+        @supports (height: 100dvh) {
+          html, body, #root { height: 100dvh; }
+        }
+        /* Fill notch/home-indicator area with bg color on iOS */
+        body {
+          background: ${bgColor};
+          /* viewport-fit=cover must be set in the HTML meta tag:
+             <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"> */
+        }
       `}</style>
 
-      <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: bgColor, overflow: 'hidden', transition: 'background 0.3s' }}>
+      <div style={{
+        position: 'fixed', top: 0, left: 0, width: '100%',
+        // Use dvh where supported so content fills Safari's full screen inc. notch area
+        height: '100%',
+        background: bgColor, overflow: 'hidden', transition: 'background 0.3s',
+      }}>
 
-        {/* Wireframe sphere background */}
+        {/* Sphere canvas bleeds beyond safe area so grid is visible behind notch/bar */}
         <SphereCanvas isDark={isDark} />
+
+        {/* Desktop typing hint — fades out after first character */}
+        {!isPortrait && !hasTyped && (
+          <div style={{
+            position: 'absolute', top: 24, left: '50%', transform: 'translateX(-50%)',
+            zIndex: 5, pointerEvents: 'none',
+            display: 'flex', alignItems: 'center', gap: 7,
+            padding: '6px 16px', borderRadius: 20,
+            background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+            border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`,
+            backdropFilter: 'blur(10px)',
+          }}>
+            <span style={{
+              fontFamily: 'monospace', fontSize: 9, letterSpacing: '0.12em',
+              textTransform: 'uppercase', color: arrowColor,
+            }}>Type freely in Hebrew</span>
+          </div>
+        )}
 
         {/* Mobile: hidden input to trigger keyboard on tap */}
         {isPortrait && (
@@ -772,7 +832,12 @@ export default function App() {
         <Canvas
           frameloop="demand"
           dpr={[1, 1.5]}
-          style={{ position: 'absolute', inset: 0, zIndex: 1 }}
+          style={{
+            position: 'absolute',
+            top: -60, bottom: -60, left: 0, right: 0,
+            height: 'calc(100% + 120px)',
+            zIndex: 1,
+          }}
           gl={{ alpha: true, preserveDrawingBuffer: true, antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
@@ -959,7 +1024,7 @@ export default function App() {
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
                   <PanelBtn onClick={() => { setParams(DEFAULT_PARAMS); setTextAlign('center') }} tk={tk}>Reset</PanelBtn>
-                  <PanelBtn onClick={() => setLines([[]])} tk={tk}>Clear</PanelBtn>
+                  <PanelBtn onClick={() => { setLines([[]]); setHasTyped(false) }} tk={tk}>Clear</PanelBtn>
                   <div style={{ flex: 1 }} />
                   <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
                 </div>
