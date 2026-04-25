@@ -187,6 +187,86 @@ function LetterScene({ lines, alefMetrics, rotX, rotY, rotZ, gap, leading, lette
   )
 }
 
+// ─── Shared mouse position ────────────────────────────────────────────────────
+const mouseNorm = { x: 0, y: 0 }
+if (typeof window !== 'undefined') {
+  window.addEventListener('mousemove', (e) => {
+    mouseNorm.x = (e.clientX / window.innerWidth)  * 2 - 1
+    mouseNorm.y = (e.clientY / window.innerHeight) * 2 - 1
+  }, { passive: true })
+}
+
+// ─── Wireframe sphere (quad grid, no diagonal triangle edges) ─────────────────
+function buildSphereEdgeGeo(radius = 32, widthSegs = 24, heightSegs = 16) {
+  const positions = []
+  const v = (theta, phi) => [
+    radius * Math.sin(phi) * Math.cos(theta),
+    radius * Math.cos(phi),
+    radius * Math.sin(phi) * Math.sin(theta),
+  ]
+  for (let j = 1; j < heightSegs; j++) {
+    const phi = (j / heightSegs) * Math.PI
+    for (let i = 0; i < widthSegs; i++) {
+      const t0 = (i / widthSegs) * Math.PI * 2
+      const t1 = ((i + 1) / widthSegs) * Math.PI * 2
+      positions.push(...v(t0, phi), ...v(t1, phi))
+    }
+  }
+  for (let i = 0; i < widthSegs; i++) {
+    const theta = (i / widthSegs) * Math.PI * 2
+    for (let j = 0; j < heightSegs; j++) {
+      const p0 = (j / heightSegs) * Math.PI
+      const p1 = ((j + 1) / heightSegs) * Math.PI
+      positions.push(...v(theta, p0), ...v(theta, p1))
+    }
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  return geo
+}
+
+function SphereWireframe({ isDark }) {
+  const groupRef = useRef()
+  const curY = useRef(0)
+  const curX = useRef(0)
+  const geo = useMemo(() => buildSphereEdgeGeo(32, 24, 16), [])
+  const mat = useMemo(() => new THREE.LineBasicMaterial({
+    color: isDark ? '#ffffff' : '#000000',
+    transparent: true,
+    opacity: isDark ? 0.12 : 0.09,
+  }), [isDark])
+
+  useFrame(() => {
+    const tY = -mouseNorm.x * (5 * Math.PI / 180)
+    const tX =  mouseNorm.y * (2.5 * Math.PI / 180)
+    curY.current += (tY - curY.current) * 0.022
+    curX.current += (tX - curX.current) * 0.022
+    if (groupRef.current) {
+      groupRef.current.rotation.y = curY.current
+      groupRef.current.rotation.x = curX.current
+    }
+  })
+
+  return (
+    <group ref={groupRef}>
+      <lineSegments geometry={geo} material={mat} />
+    </group>
+  )
+}
+
+function SphereCanvas({ isDark }) {
+  return (
+    <Canvas
+      style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
+      gl={{ alpha: true, antialias: true }}
+      onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+      camera={{ position: [0, 0, 0.001], fov: 75, near: 0.1, far: 300 }}
+    >
+      <SphereWireframe isDark={isDark} />
+    </Canvas>
+  )
+}
+
 // ─── Lights ───────────────────────────────────────────────────────────────────
 function Lights() {
   return (
@@ -324,14 +404,31 @@ function PanelBtn({ onClick, children, active, tk }) {
 }
 
 // ─── Draggable panel ──────────────────────────────────────────────────────────
-function DraggablePanel({ children, initialPos }) {
+const TAB_W = 44
+const TAB_H = 24
+
+function DraggablePanel({ children, initialPos, collapsed }) {
   const dragState = useRef({ dragging: false, ox: 0, oy: 0 })
   const [pos, setPos] = useState(initialPos)
 
-  const clamp = useCallback((x, y) => ({
-    x: Math.max(0, Math.min(window.innerWidth - PANEL_W, x)),
-    y: Math.max(0, Math.min(window.innerHeight - PANEL_H, y)),
-  }), [])
+  // When expanded: keep panel fully in view. When collapsed: tab can go anywhere.
+  const clamp = useCallback((x, y) => {
+    if (collapsed) {
+      return {
+        x: Math.max(0, Math.min(window.innerWidth - TAB_W, x)),
+        y: Math.max(TAB_H, Math.min(window.innerHeight - TAB_H, y)),
+      }
+    }
+    return {
+      x: Math.max(0, Math.min(window.innerWidth - PANEL_W, x)),
+      y: Math.max(0, Math.min(window.innerHeight - PANEL_H, y)),
+    }
+  }, [collapsed])
+
+  // When transitioning from collapsed→expanded, nudge back in bounds if needed
+  useEffect(() => {
+    setPos(p => clamp(p.x, p.y))
+  }, [collapsed, clamp])
 
   useEffect(() => {
     const onResize = () => setPos(p => clamp(p.x, p.y))
@@ -373,6 +470,7 @@ export default function App() {
   const [panelReady, setPanelReady] = useState(false)
   const [initPos, setInitPos] = useState({ x: 0, y: 0 })
   const [theme, setTheme] = useState('dark')
+  const [collapsed, setCollapsed] = useState(false)
   const isPortrait = useIsPortrait()
   const zoom = isPortrait ? ZOOM_MOBILE : ZOOM_DESKTOP
   const glCanvasRef = useRef(null)
@@ -460,9 +558,7 @@ export default function App() {
   }, [])
 
   const bgColor = isDark ? '#000' : '#fff'
-  const gridFilter = isDark ? 'none' : 'invert(1)'
-  // Canvas is never inverted — letters are always black, bg is transparent
-  const canvasFilter = 'none'
+  const arrowColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'
 
   // Shared label style
   const labelStyle = {
@@ -481,14 +577,11 @@ export default function App() {
 
       <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: bgColor, overflow: 'hidden', transition: 'background 0.3s' }}>
 
-        <img src="/grid.svg" alt="" style={{
-          position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-          objectFit: 'cover', pointerEvents: 'none', zIndex: 0,
-          filter: gridFilter, transition: 'filter 0.3s',
-        }} />
+        {/* Wireframe sphere background */}
+        <SphereCanvas isDark={isDark} />
 
         <Canvas
-          style={{ position: 'absolute', inset: 0, zIndex: 1, filter: canvasFilter, transition: 'filter 0.3s' }}
+          style={{ position: 'absolute', inset: 0, zIndex: 1 }}
           gl={{ alpha: true, preserveDrawingBuffer: true }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
@@ -512,88 +605,125 @@ export default function App() {
         </Canvas>
 
         {panelReady && (
-          <DraggablePanel initialPos={initPos}>
-            <div style={{
-              width: PANEL_W,
-              background: tk.panelBg,
-              backdropFilter: 'blur(20px) saturate(140%)',
-              WebkitBackdropFilter: 'blur(20px) saturate(140%)',
-              border: `1px solid ${tk.panelBorder}`,
-              borderRadius: 20, padding: '14px 16px 12px',
-              boxShadow: '0 8px 40px rgba(0,0,0,0.35)',
-              position: 'relative', zIndex: 10,
-              transition: 'background 0.3s, border-color 0.3s',
-            }}>
+          <DraggablePanel initialPos={initPos} collapsed={collapsed}>
+            <div style={{ position: 'relative' }}>
 
-              {/* ── All sliders unified: rotX/Y/Z then divider then gap/lead/size ── */}
-              {/* Same gap=12 throughout */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} data-nodrag>
-                <GlassSlider value={params.rotX} min={-180} max={180} onChange={set('rotX')} tk={tk} />
-                <GlassSlider value={params.rotY} min={-180} max={180} onChange={set('rotY')} tk={tk} />
-                <GlassSlider value={params.rotZ} min={-180} max={180} onChange={set('rotZ')} tk={tk} />
+              {/* ── Collapse tab — on the LEFT EDGE of the slab, vertically centered near top ── */}
+              {/* Rotated so it reads as a side tab */}
+              <div
+                data-nodrag
+                onClick={() => setCollapsed(c => !c)}
+                style={{
+                  position: 'absolute',
+                  top: 12,
+                  left: -22,            // sits flush against the left edge of the slab
+                  width: 22,
+                  height: 40,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: tk.panelBg,
+                  backdropFilter: 'blur(20px)',
+                  WebkitBackdropFilter: 'blur(20px)',
+                  border: `1px solid ${tk.panelBorder}`,
+                  borderRight: 'none',  // merges with slab
+                  borderRadius: '8px 0 0 8px',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                  zIndex: 11,
+                  transition: 'background 0.3s',
+                }}
+              >
+                <svg
+                  width="8" height="12" viewBox="0 0 8 12" fill="none"
+                  style={{
+                    transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)',
+                    transition: 'transform 0.25s ease',
+                  }}
+                >
+                  {/* Chevron pointing left (←) when expanded, right (→) when collapsed */}
+                  <path d="M6 2L2 6L6 10" stroke={arrowColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
               </div>
 
-              {/* ── XYZ readouts (left) + Cube (right) ── */}
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 28 }}>
-                <div style={{ flex: 1 }} data-nodrag>
-                  {[['X', 'rotX'], ['Y', 'rotY'], ['Z', 'rotZ']].map(([label, key]) => (
-                    <div key={key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 0 }}>
-                      <span style={{ width: 12, ...valStyle, color: tk.textDim, fontSize: 10 }}>{label}</span>
-                      <span style={{ ...valStyle, fontSize: 10 }}>{params[key]}°</span>
-                    </div>
-                  ))}
-                </div>
-                {/* Cube — same level as XYZ values */}
-                <div data-nodrag style={{ flexShrink: 0, width: 100, height: 80, position: 'relative' }}>
-                  <Canvas
-                    style={{
-                      position: 'absolute', top: '50%', left: '50%',
-                      transform: 'translate(-50%, -50%)',
-                      width: 130, height: 130,
-                      background: 'transparent', cursor: 'grab',
-                    }}
-                    gl={{ alpha: true }}
-                    orthographic
-                    camera={{ zoom: 55, position: [0, 0, 10], near: 0.1, far: 100 }}
-                  >
-                    <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} isDark={isDark} />
-                  </Canvas>
-                </div>
-              </div>
+              {/* ── Panel slab — fully invisible when collapsed (no border, no bg) ── */}
+              <div style={{
+                width: collapsed ? 0 : PANEL_W,
+                background: collapsed ? 'transparent' : tk.panelBg,
+                backdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
+                WebkitBackdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
+                border: collapsed ? 'none' : `1px solid ${tk.panelBorder}`,
+                borderRadius: 20,
+                padding: collapsed ? 0 : '14px 16px 12px',
+                boxShadow: collapsed ? 'none' : '0 8px 40px rgba(0,0,0,0.35)',
+                overflow: 'hidden',
+                maxHeight: collapsed ? 0 : 600,
+                transition: 'max-height 0.3s ease, padding 0.3s ease, width 0.3s ease, background 0.3s, border-color 0.3s, box-shadow 0.3s',
+                position: 'relative', zIndex: 10,
+                visibility: collapsed ? 'hidden' : 'visible',
+              }}>
 
-              {/* ── Typography sliders — same gap=12 as rotation sliders ── */}
-              <div style={{ borderTop: `1px solid ${tk.divider}`, paddingTop: 12, marginTop: 28, display: 'flex', flexDirection: 'column', gap: 0 }} data-nodrag>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={labelStyle}>Gap</span>
-                  <GlassSlider value={params.gap} min={0} max={6} step={0.05} onChange={set('gap')} tk={tk} />
-                  <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.gap.toFixed(1)}</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} data-nodrag>
+                  <GlassSlider value={params.rotX} min={-180} max={180} onChange={set('rotX')} tk={tk} />
+                  <GlassSlider value={params.rotY} min={-180} max={180} onChange={set('rotY')} tk={tk} />
+                  <GlassSlider value={params.rotZ} min={-180} max={180} onChange={set('rotZ')} tk={tk} />
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={labelStyle}>Lead</span>
-                  <GlassSlider value={params.leading} min={4} max={20} step={0.1} onChange={set('leading')} tk={tk} />
-                  <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.leading.toFixed(1)}</span>
+
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 28 }}>
+                  <div style={{ flex: 1 }} data-nodrag>
+                    {[['X', 'rotX'], ['Y', 'rotY'], ['Z', 'rotZ']].map(([label, key]) => (
+                      <div key={key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 0 }}>
+                        <span style={{ width: 12, ...valStyle, color: tk.textDim, fontSize: 10 }}>{label}</span>
+                        <span style={{ ...valStyle, fontSize: 10 }}>{params[key]}°</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div data-nodrag style={{ flexShrink: 0, width: 100, height: 80, position: 'relative' }}>
+                    <Canvas
+                      style={{
+                        position: 'absolute', top: '50%', left: '50%',
+                        transform: 'translate(-50%, -50%)',
+                        width: 130, height: 130,
+                        background: 'transparent', cursor: 'grab',
+                      }}
+                      gl={{ alpha: true }}
+                      orthographic
+                      camera={{ zoom: 55, position: [0, 0, 10], near: 0.1, far: 100 }}
+                    >
+                      <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} isDark={isDark} />
+                    </Canvas>
+                  </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span style={labelStyle}>Size</span>
-                  <GlassSlider value={params.size} min={0.5} max={1.5} step={0.01} onChange={set('size')} tk={tk} />
+
+                <div style={{ borderTop: `1px solid ${tk.divider}`, paddingTop: 12, marginTop: 28, display: 'flex', flexDirection: 'column', gap: 0 }} data-nodrag>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={labelStyle}>Gap</span>
+                    <GlassSlider value={params.gap} min={0} max={6} step={0.05} onChange={set('gap')} tk={tk} />
+                    <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.gap.toFixed(1)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={labelStyle}>Lead</span>
+                    <GlassSlider value={params.leading} min={4} max={20} step={0.1} onChange={set('leading')} tk={tk} />
+                    <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.leading.toFixed(1)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={labelStyle}>Size</span>
+                    <GlassSlider value={params.size} min={0.5} max={1.5} step={0.01} onChange={set('size')} tk={tk} />
+                  </div>
                 </div>
-              </div>
 
-              {/* ── Actions: Reset / Clear / spacer / Print ── */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
-                <PanelBtn onClick={() => setParams(DEFAULT_PARAMS)} tk={tk}>Reset</PanelBtn>
-                <PanelBtn onClick={() => setLines([[]])} tk={tk}>Clear</PanelBtn>
-                <div style={{ flex: 1 }} />
-                <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
-              </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
+                  <PanelBtn onClick={() => setParams(DEFAULT_PARAMS)} tk={tk}>Reset</PanelBtn>
+                  <PanelBtn onClick={() => setLines([[]])} tk={tk}>Clear</PanelBtn>
+                  <div style={{ flex: 1 }} />
+                  <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
+                </div>
 
-              {/* ── Theme ── */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 7 }} data-nodrag>
-                <span style={{ ...labelStyle, width: 'auto', marginRight: 2 }}>Theme</span>
-                <PanelBtn onClick={() => setTheme('dark')} active={theme === 'dark'} tk={tk}>Dark</PanelBtn>
-                <PanelBtn onClick={() => setTheme('light')} active={theme === 'light'} tk={tk}>Light</PanelBtn>
-              </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 7 }} data-nodrag>
+                  <span style={{ ...labelStyle, width: 'auto', marginRight: 2 }}>Theme</span>
+                  <PanelBtn onClick={() => setTheme('dark')} active={theme === 'dark'} tk={tk}>Dark</PanelBtn>
+                  <PanelBtn onClick={() => setTheme('light')} active={theme === 'light'} tk={tk}>Light</PanelBtn>
+                </div>
 
+              </div>
             </div>
           </DraggablePanel>
         )}
