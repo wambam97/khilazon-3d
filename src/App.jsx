@@ -315,12 +315,7 @@ function SphereCanvas({ isDark }) {
     <Canvas
       frameloop="demand"
       dpr={[1, 1.5]}
-      style={{
-        position: 'absolute',
-        top: -100, left: 0, right: 0,
-        height: 'calc(100% + 200px)',
-        zIndex: 1, pointerEvents: 'none',
-      }}
+      style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
       gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
       onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
       camera={{ position: [0, 0, 0.001], fov: 75, near: 0.1, far: 300 }}
@@ -758,24 +753,27 @@ export default function App() {
   return (
     <>
       <style>{`
-        html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
-        @supports (height: 100dvh) { html, body, #root { height: 100dvh; } }
-        body { background: ${bgColor}; }
+        html { margin:0; padding:0; background:${bgColor}; }
+        body {
+          margin:0; padding:0;
+          /* body background fills notch/home bar on iOS when viewport-fit=cover is set */
+          background:${bgColor};
+          width:100%; height:100%;
+          overflow:hidden;
+        }
+        #root {
+          width:100%; height:100%;
+          overflow:hidden;
+        }
+        @supports (height: 100dvh) {
+          body, #root { height: 100dvh; }
+        }
       `}</style>
 
       <div style={{
         position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-        overflow: 'hidden', transition: 'background 0.3s',
+        overflow: 'hidden',
       }}>
-
-        {/* Bg color layer — oversized to bleed behind iOS notch and home bar */}
-        <div style={{
-          position: 'absolute', left: 0, right: 0,
-          top: -100, height: 'calc(100% + 200px)',
-          background: bgColor,
-          zIndex: 0, pointerEvents: 'none',
-          transition: 'background 0.3s',
-        }} />
 
         {/* Sphere canvas — also oversize */}
         <SphereCanvas isDark={isDark} />
@@ -838,12 +836,7 @@ export default function App() {
         <Canvas
           frameloop="demand"
           dpr={[1, 1.5]}
-          style={{
-            position: 'absolute',
-            top: -100, left: 0, right: 0,
-            height: 'calc(100% + 200px)',
-            zIndex: 2,
-          }}
+          style={{ position: 'absolute', inset: 0, zIndex: 1 }}
           gl={{ alpha: true, preserveDrawingBuffer: true, antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
