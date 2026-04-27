@@ -316,8 +316,11 @@ function SphereCanvas({ isDark }) {
       frameloop="demand"
       dpr={[1, 1.5]}
       style={{
-        position: 'fixed',   // fixed escapes overflow:hidden on the container
-        inset: 0,
+        position: 'absolute',
+        // Bleed 60px top and bottom beyond the container so it's visible
+        // behind Safari's notch and address bar
+        top: -60, bottom: -60, left: 0, right: 0,
+        height: 'calc(100% + 120px)',
         zIndex: 0, pointerEvents: 'none',
       }}
       gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
@@ -476,14 +479,17 @@ function PanelBtn({ onClick, children, active, tk }) {
 const TAB_W = 44
 const TAB_H = 24
 
-function DraggablePanel({ children, initialPos, collapsed, onPosChange }) {
+function DraggablePanel({ children, initialPos, collapsed }) {
   const dragState = useRef({ dragging: false, ox: 0, oy: 0 })
   const [pos, setPos] = useState(initialPos)
 
+  // When expanded: keep panel fully in view. When collapsed: tab can go anywhere.
   const clamp = useCallback((x, y) => {
-    if (collapsed) return {
-      x: Math.max(0, Math.min(window.innerWidth - TAB_W, x)),
-      y: Math.max(0, Math.min(window.innerHeight - TAB_H * 2, y)),
+    if (collapsed) {
+      return {
+        x: Math.max(0, Math.min(window.innerWidth - TAB_W, x)),
+        y: Math.max(TAB_H, Math.min(window.innerHeight - TAB_H, y)),
+      }
     }
     return {
       x: Math.max(0, Math.min(window.innerWidth - PANEL_W, x)),
@@ -491,18 +497,13 @@ function DraggablePanel({ children, initialPos, collapsed, onPosChange }) {
     }
   }, [collapsed])
 
+  // When transitioning from collapsed→expanded, nudge back in bounds if needed
   useEffect(() => {
-    const clamped = clamp(pos.x, pos.y)
-    setPos(clamped)
-    onPosChange?.(clamped)
-  }, [collapsed]) // eslint-disable-line
+    setPos(p => clamp(p.x, p.y))
+  }, [collapsed, clamp])
 
   useEffect(() => {
-    const onResize = () => setPos(p => {
-      const c = clamp(p.x, p.y)
-      onPosChange?.(c)
-      return c
-    })
+    const onResize = () => setPos(p => clamp(p.x, p.y))
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [clamp])
@@ -516,9 +517,7 @@ function DraggablePanel({ children, initialPos, collapsed, onPosChange }) {
   useEffect(() => {
     const onMove = (e) => {
       if (!dragState.current.dragging) return
-      const next = clamp(e.clientX - dragState.current.ox, e.clientY - dragState.current.oy)
-      setPos(next)
-      onPosChange?.(next)
+      setPos(clamp(e.clientX - dragState.current.ox, e.clientY - dragState.current.oy))
     }
     const onUp = () => { dragState.current.dragging = false }
     window.addEventListener('mousemove', onMove)
@@ -550,7 +549,6 @@ export default function App() {
   const zoom = isPortrait ? ZOOM_MOBILE : ZOOM_DESKTOP
   const glCanvasRef = useRef(null)
   const mobileInputRef = useRef(null)
-  const [panelPos, setPanelPos] = useState({ x: 0, y: 0 })
 
   const isDark = theme === 'dark'
   const tk = useThemeTokens(isDark)
@@ -569,7 +567,6 @@ export default function App() {
     const x = Math.max(0, Math.min(window.innerWidth - PANEL_W, window.innerWidth / 2 - PANEL_W / 2))
     const y = Math.max(0, Math.min(window.innerHeight - PANEL_H, window.innerHeight - PANEL_H - 28))
     setInitPos({ x, y })
-    setPanelPos({ x, y })
     setPanelReady(true)
   }, [])
 
@@ -588,8 +585,6 @@ export default function App() {
       'פ': '80','ף': '81','צ': '90','ץ': '91','ק': '100','ר': '200','ש': '300','ת': '400'
     }
     const handleKeyDown = (e) => {
-      // Prevent double-firing on mobile where hidden input also triggers keydown
-      if (mobileInputRef.current && document.activeElement === mobileInputRef.current) return
       if (e.key === 'Enter') {
         setHasTyped(true)
         setLines(prev => {
@@ -757,30 +752,26 @@ export default function App() {
   return (
     <>
       <style>{`
-        html { margin:0; padding:0; background:${bgColor}; }
-        body {
-          margin:0; padding:0;
-          background:${bgColor};
-          width:100%; height:100%;
-          overflow:hidden;
-        }
-        #root {
-          width:100%; height:100%;
-          overflow:hidden;
-        }
+        html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:${bgColor}; }
         @supports (height: 100dvh) {
-          body, #root { height: 100dvh; }
+          html, body, #root { height: 100dvh; }
         }
-        /* Kill any browser-default canvas borders that show as white lines */
-        canvas { display: block; border: none; outline: none; }
+        /* Fill notch/home-indicator area with bg color on iOS */
+        body {
+          background: ${bgColor};
+          /* viewport-fit=cover must be set in the HTML meta tag:
+             <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"> */
+        }
       `}</style>
 
       <div style={{
-        position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-        overflow: 'hidden',
+        position: 'fixed', top: 0, left: 0, width: '100%',
+        // Use dvh where supported so content fills Safari's full screen inc. notch area
+        height: '100%',
+        background: bgColor, overflow: 'hidden', transition: 'background 0.3s',
       }}>
 
-        {/* Sphere canvas — also oversize */}
+        {/* Sphere canvas bleeds beyond safe area so grid is visible behind notch/bar */}
         <SphereCanvas isDark={isDark} />
 
         {/* Desktop typing hint — fades out after first character */}
@@ -841,7 +832,12 @@ export default function App() {
         <Canvas
           frameloop="demand"
           dpr={[1, 1.5]}
-          style={{ position: 'absolute', inset: 0, zIndex: 1 }}
+          style={{
+            position: 'absolute',
+            top: -60, bottom: -60, left: 0, right: 0,
+            height: 'calc(100% + 120px)',
+            zIndex: 1,
+          }}
           gl={{ alpha: true, preserveDrawingBuffer: true, antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
         >
@@ -865,64 +861,62 @@ export default function App() {
           </EffectComposer>
         </Canvas>
 
-        {/* Mobile: tap anywhere to collapse (not toggle — only collapses) */}
-        {isPortrait && !collapsed && (
-          <div
-            onClick={() => setCollapsed(true)}
-            style={{ position: 'absolute', inset: 0, zIndex: 3, background: 'transparent' }}
-          />
-        )}
-
-        {/* Collapse tab — independent element, tracks panel position */}
-        {panelReady && (() => {
-          const tabX = panelPos.x - 22
-          const tabY = panelPos.y + 12
-          return (
-            <div
-              onClick={(e) => { e.stopPropagation(); setCollapsed(c => !c) }}
-              style={{
-                position: 'absolute',
-                left: tabX, top: tabY,
-                width: 22, height: 40,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: tk.panelBg,
-                backdropFilter: 'blur(20px)',
-                WebkitBackdropFilter: 'blur(20px)',
-                border: `1px solid ${tk.panelBorder}`,
-                borderRight: collapsed ? `1px solid ${tk.panelBorder}` : 'none',
-                borderRadius: collapsed ? '8px' : '8px 0 0 8px',
-                cursor: 'pointer',
-                userSelect: 'none',
-                zIndex: 20,
-                transition: 'background 0.3s, border-radius 0.2s',
-              }}
-            >
-              <svg width="8" height="12" viewBox="0 0 8 12" fill="none"
-                style={{ transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.25s ease' }}
-              >
-                <path d="M6 2L2 6L6 10" stroke={arrowColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </div>
-          )
-        })()}
-
         {panelReady && (
-          <DraggablePanel initialPos={initPos} collapsed={collapsed} onPosChange={setPanelPos}>
-            {/* ── Panel slab — fully invisible when collapsed ── */}
-            <div style={{
-              width: collapsed ? 0 : PANEL_W,
-              background: collapsed ? 'transparent' : tk.panelBg,
-              backdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
-              WebkitBackdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
-              border: collapsed ? 'none' : `1px solid ${tk.panelBorder}`,
-              borderRadius: 20,
-              padding: collapsed ? 0 : '14px 16px 12px',
-              overflow: 'hidden',
-              maxHeight: collapsed ? 0 : 600,
-              transition: 'max-height 0.3s ease, padding 0.3s ease, width 0.3s ease, background 0.3s, border-color 0.3s',
-              position: 'relative', zIndex: 10,
-              visibility: collapsed ? 'hidden' : 'visible',
-            }}>
+          <DraggablePanel initialPos={initPos} collapsed={collapsed}>
+            <div style={{ position: 'relative' }}>
+
+              {/* ── Collapse tab — on the LEFT EDGE of the slab, vertically centered near top ── */}
+              {/* Rotated so it reads as a side tab */}
+              <div
+                data-nodrag
+                onClick={() => setCollapsed(c => !c)}
+                style={{
+                  position: 'absolute',
+                  top: 12,
+                  left: -22,            // sits flush against the left edge of the slab
+                  width: 22,
+                  height: 40,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: tk.panelBg,
+                  backdropFilter: 'blur(20px)',
+                  WebkitBackdropFilter: 'blur(20px)',
+                  border: `1px solid ${tk.panelBorder}`,
+                  borderRight: collapsed ? `1px solid ${tk.panelBorder}` : 'none',
+                  borderRadius: collapsed ? '8px' : '8px 0 0 8px',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                  zIndex: 11,
+                  transition: 'background 0.3s',
+                }}
+              >
+                <svg
+                  width="8" height="12" viewBox="0 0 8 12" fill="none"
+                  style={{
+                    transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)',
+                    transition: 'transform 0.25s ease',
+                  }}
+                >
+                  {/* Chevron pointing left (←) when expanded, right (→) when collapsed */}
+                  <path d="M6 2L2 6L6 10" stroke={arrowColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </div>
+
+              {/* ── Panel slab — fully invisible when collapsed (no border, no bg) ── */}
+              <div style={{
+                width: collapsed ? 0 : PANEL_W,
+                background: collapsed ? 'transparent' : tk.panelBg,
+                backdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
+                WebkitBackdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
+                border: collapsed ? 'none' : `1px solid ${tk.panelBorder}`,
+                borderRadius: 20,
+                padding: collapsed ? 0 : '14px 16px 12px',
+                // boxShadow: collapsed ? 'none' : '0 8px 40px rgba(0,0,0,0.35)',
+                overflow: 'hidden',
+                maxHeight: collapsed ? 0 : 600,
+                transition: 'max-height 0.3s ease, padding 0.3s ease, width 0.3s ease, background 0.3s, border-color 0.3s, box-shadow 0.3s',
+                position: 'relative', zIndex: 10,
+                visibility: collapsed ? 'hidden' : 'visible',
+              }}>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} data-nodrag>
                   <GlassSlider value={params.rotX} min={-180} max={180} onChange={set('rotX')} tk={tk} />
@@ -1041,6 +1035,7 @@ export default function App() {
                   <PanelBtn onClick={() => setTheme('light')} active={theme === 'light'} tk={tk}>Light</PanelBtn>
                 </div>
 
+              </div>
             </div>
           </DraggablePanel>
         )}
