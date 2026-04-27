@@ -315,7 +315,11 @@ function SphereCanvas({ isDark }) {
     <Canvas
       frameloop="demand"
       dpr={[1, 1.5]}
-      style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
+      style={{
+        position: 'fixed',   // fixed escapes overflow:hidden on the container
+        inset: 0,
+        zIndex: 0, pointerEvents: 'none',
+      }}
       gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
       onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
       camera={{ position: [0, 0, 0.001], fov: 75, near: 0.1, far: 300 }}
@@ -756,7 +760,6 @@ export default function App() {
         html { margin:0; padding:0; background:${bgColor}; }
         body {
           margin:0; padding:0;
-          /* body background fills notch/home bar on iOS when viewport-fit=cover is set */
           background:${bgColor};
           width:100%; height:100%;
           overflow:hidden;
@@ -768,6 +771,8 @@ export default function App() {
         @supports (height: 100dvh) {
           body, #root { height: 100dvh; }
         }
+        /* Kill any browser-default canvas borders that show as white lines */
+        canvas { display: block; border: none; outline: none; }
       `}</style>
 
       <div style={{
