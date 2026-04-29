@@ -755,11 +755,12 @@ export default function App() {
         html { background:${bgColor}; }
         body { background:${bgColor}; transition: background 0.3s; }
         @supports (height: 100dvh) { html, body, #root { height: 100dvh; } }
+        canvas { display:block; background:transparent !important; }
       `}</style>
 
       <div style={{
         position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-        overflow: 'hidden',
+        overflow: 'hidden', background: bgColor, transition: 'background 0.3s',
       }}>
 
         {/* Sphere canvas bleeds beyond safe area so grid is visible behind notch/bar */}
@@ -836,10 +837,10 @@ export default function App() {
           frameloop="demand"
           dpr={[1, 1.5]}
           style={{
-            position: 'absolute',
-            top: -60, bottom: -60, left: 0, right: 0,
-            height: 'calc(100% + 120px)',
+            position: 'fixed',
+            inset: 0,
             zIndex: 1,
+            background: 'transparent',
           }}
           gl={{ alpha: true, preserveDrawingBuffer: true, antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => { gl.setClearColor(0x000000, 0); glCanvasRef.current = gl.domElement }}
