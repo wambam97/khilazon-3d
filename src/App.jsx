@@ -316,11 +316,8 @@ function SphereCanvas({ isDark }) {
       frameloop="demand"
       dpr={[1, 1.5]}
       style={{
-        position: 'absolute',
-        // Bleed 60px top and bottom beyond the container so it's visible
-        // behind Safari's notch and address bar
-        top: -60, bottom: -60, left: 0, right: 0,
-        height: 'calc(100% + 120px)',
+        position: 'fixed',  // fixed = relative to viewport, not clipped by container overflow
+        inset: 0,
         zIndex: 0, pointerEvents: 'none',
       }}
       gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
@@ -585,6 +582,8 @@ export default function App() {
       'פ': '80','ף': '81','צ': '90','ץ': '91','ק': '100','ר': '200','ש': '300','ת': '400'
     }
     const handleKeyDown = (e) => {
+      // Prevent double-firing on mobile — hidden input also triggers keydown on window
+      if (mobileInputRef.current && document.activeElement === mobileInputRef.current) return
       if (e.key === 'Enter') {
         setHasTyped(true)
         setLines(prev => {
@@ -752,23 +751,15 @@ export default function App() {
   return (
     <>
       <style>{`
-        html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:${bgColor}; }
-        @supports (height: 100dvh) {
-          html, body, #root { height: 100dvh; }
-        }
-        /* Fill notch/home-indicator area with bg color on iOS */
-        body {
-          background: ${bgColor};
-          /* viewport-fit=cover must be set in the HTML meta tag:
-             <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"> */
-        }
+        html, body, #root { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
+        html { background:${bgColor}; }
+        body { background:${bgColor}; transition: background 0.3s; }
+        @supports (height: 100dvh) { html, body, #root { height: 100dvh; } }
       `}</style>
 
       <div style={{
-        position: 'fixed', top: 0, left: 0, width: '100%',
-        // Use dvh where supported so content fills Safari's full screen inc. notch area
-        height: '100%',
-        background: bgColor, overflow: 'hidden', transition: 'background 0.3s',
+        position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+        overflow: 'hidden',
       }}>
 
         {/* Sphere canvas bleeds beyond safe area so grid is visible behind notch/bar */}
@@ -797,6 +788,18 @@ export default function App() {
           <input
             ref={mobileInputRef}
             onInput={handleMobileInput}
+            onKeyDown={(e) => {
+              if (e.key === 'Backspace') {
+                e.preventDefault()
+                setLines(prev => {
+                  const n = prev.map(l => [...l])
+                  const last = n[n.length - 1]
+                  if (last.length > 0) n[n.length - 1] = last.slice(0, -1)
+                  else if (n.length > 1) n.pop()
+                  return n
+                })
+              }
+            }}
             style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1, top: 0, left: 0 }}
             type="text" autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck="false"
           />
@@ -860,6 +863,14 @@ export default function App() {
             <Bloom intensity={2.2} luminanceThreshold={0.3} luminanceSmoothing={0.85} radius={0.85} />
           </EffectComposer>
         </Canvas>
+
+        {/* Mobile: tap anywhere on screen to collapse panel */}
+        {isPortrait && !collapsed && (
+          <div
+            onClick={() => setCollapsed(true)}
+            style={{ position: 'absolute', inset: 0, zIndex: 4, background: 'transparent' }}
+          />
+        )}
 
         {panelReady && (
           <DraggablePanel initialPos={initPos} collapsed={collapsed}>
