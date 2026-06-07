@@ -1,6 +1,6 @@
 import React, { useState, useEffect, Suspense, useMemo, useRef, useCallback } from 'react'
 import { Canvas, useLoader, useThree, useFrame } from '@react-three/fiber'
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 import { Environment, OrthographicCamera as DreiOrtho } from '@react-three/drei'
 import { EffectComposer, Bloom } from '@react-three/postprocessing'
 import * as THREE from 'three'
@@ -36,7 +36,7 @@ function useIsPortrait() {
 
 // ─── Letter ───────────────────────────────────────────────────────────────────
 function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, targetRotZ, letterScale }) {
-  const obj = useLoader(OBJLoader, `/models/${type}.obj`)
+  const gltf = useLoader(GLTFLoader, `/models/${type}.glb`)
   const groupRef = useRef()
   const currentRot = useRef({
     x: targetRotX * Math.PI / 180,
@@ -73,33 +73,50 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
   }), [])
 
   const processedObj = useMemo(() => {
-    const clone = obj.clone()
-    const box = new THREE.Box3().setFromObject(clone)
-    const center = new THREE.Vector3()
-    box.getCenter(center)
+    const clone = gltf.scene.clone(true)
 
-    clone.traverse((child) => {
-      if (child.isMesh) {
-        let geo = child.geometry.clone()
-        geo.translate(-center.x, -center.y, -center.z)
-        geo.deleteAttribute('normal')
-        try { geo.deleteAttribute('uv') } catch (e) {}
-        try { geo = mergeVertices(geo, 1e-4) } catch (e) {}
-        geo.computeVertexNormals()
-        geo.computeBoundingBox()
-        const localBox = geo.boundingBox
-        if (alefMetrics) {
-          let offsetY = 0
-          if (align === 'top') offsetY = localBox.max.y - alefMetrics.top
-          else if (align === 'bottom') offsetY = localBox.min.y - alefMetrics.bottom
-          geo.translate(0, -offsetY, 0)
-        }
-        child.geometry = geo
-        child.material = material
-      }
+    // Flatten all world transforms into geometry so we have a clean origin
+    clone.updateWorldMatrix(true, true)
+
+    const meshes = []
+    clone.traverse(child => { if (child.isMesh) meshes.push(child) })
+
+    // Compute the combined world-space bounding box across all meshes
+    const worldBox = new THREE.Box3()
+    meshes.forEach(child => {
+      const geo = child.geometry.clone()
+      geo.applyMatrix4(child.matrixWorld)
+      const b = new THREE.Box3().setFromBufferAttribute(geo.attributes.position)
+      worldBox.union(b)
     })
-    return clone
-  }, [obj, align, alefMetrics, material])
+    const worldCenter = new THREE.Vector3()
+    worldBox.getCenter(worldCenter)
+
+    // Rebuild a flat group with processed geometries, all centered
+    const group = new THREE.Group()
+    meshes.forEach(child => {
+      let geo = child.geometry.clone()
+      geo.applyMatrix4(child.matrixWorld)
+      geo.translate(-worldCenter.x, -worldCenter.y, -worldCenter.z)
+      geo.deleteAttribute('normal')
+      try { geo.deleteAttribute('uv') } catch (e) {}
+      try { geo = mergeVertices(geo, 1e-4) } catch (e) {}
+      geo.computeVertexNormals()
+      geo.computeBoundingBox()
+
+      if (alefMetrics) {
+        const localBox = geo.boundingBox
+        let offsetY = 0
+        if (align === 'top') offsetY = localBox.max.y - alefMetrics.top
+        else if (align === 'bottom') offsetY = localBox.min.y - alefMetrics.bottom
+        geo.translate(0, -offsetY, 0)
+      }
+
+      const mesh = new THREE.Mesh(geo, material)
+      group.add(mesh)
+    })
+    return group
+  }, [gltf, align, alefMetrics, material])
 
   return (
     <group position={position} scale={[letterScale, letterScale, letterScale]}>
@@ -114,15 +131,24 @@ function Letter({ type, position, align, alefMetrics, targetRotX, targetRotY, ta
 const widthCache = {}
 
 function LetterWidthProbe({ type, onDone }) {
-  const obj = useLoader(OBJLoader, `/models/${type}.obj`)
+  const gltf = useLoader(GLTFLoader, `/models/${type}.glb`)
   useEffect(() => {
     if (widthCache[type] !== undefined) { onDone(); return }
-    const box = new THREE.Box3().setFromObject(obj)
+    const scene = gltf.scene.clone(true)
+    scene.updateWorldMatrix(true, true)
+    const box = new THREE.Box3()
+    scene.traverse(child => {
+      if (child.isMesh) {
+        const geo = child.geometry.clone()
+        geo.applyMatrix4(child.matrixWorld)
+        box.union(new THREE.Box3().setFromBufferAttribute(geo.attributes.position))
+      }
+    })
     const size = new THREE.Vector3()
     box.getSize(size)
     widthCache[type] = size.x
     onDone()
-  }, [obj])
+  }, [gltf])
   return null
 }
 
@@ -452,7 +478,7 @@ function GlassSlider({ value, min, max, step = 1, onChange, tk }) {
 }
 
 // ─── Panel button (theme-aware) ───────────────────────────────────────────────
-function PanelBtn({ onClick, children, active, tk }) {
+function PanelBtn({ onClick, children, active, tk, fixedWidth }) {
   const [h, setH] = useState(false)
   return (
     <button
@@ -467,68 +493,13 @@ function PanelBtn({ onClick, children, active, tk }) {
         cursor: 'pointer', fontFamily: 'monospace', fontSize: 8,
         letterSpacing: '0.1em', textTransform: 'uppercase',
         flexShrink: 0, transition: 'all 0.15s',
+        ...(fixedWidth ? { width: fixedWidth, textAlign: 'center', padding: '3px 0' } : {}),
       }}
     >{children}</button>
   )
 }
 
-// ─── Draggable panel ──────────────────────────────────────────────────────────
-const TAB_W = 44
-const TAB_H = 24
-
-function DraggablePanel({ children, initialPos, collapsed }) {
-  const dragState = useRef({ dragging: false, ox: 0, oy: 0 })
-  const [pos, setPos] = useState(initialPos)
-
-  // When expanded: keep panel fully in view. When collapsed: tab can go anywhere.
-  const clamp = useCallback((x, y) => {
-    if (collapsed) {
-      return {
-        x: Math.max(0, Math.min(window.innerWidth - TAB_W, x)),
-        y: Math.max(TAB_H, Math.min(window.innerHeight - TAB_H, y)),
-      }
-    }
-    return {
-      x: Math.max(0, Math.min(window.innerWidth - PANEL_W, x)),
-      y: Math.max(0, Math.min(window.innerHeight - PANEL_H, y)),
-    }
-  }, [collapsed])
-
-  // When transitioning from collapsed→expanded, nudge back in bounds if needed
-  useEffect(() => {
-    setPos(p => clamp(p.x, p.y))
-  }, [collapsed, clamp])
-
-  useEffect(() => {
-    const onResize = () => setPos(p => clamp(p.x, p.y))
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [clamp])
-
-  const onMouseDown = (e) => {
-    if (e.target.closest('[data-nodrag]')) return
-    dragState.current = { dragging: true, ox: e.clientX - pos.x, oy: e.clientY - pos.y }
-    e.preventDefault()
-  }
-
-  useEffect(() => {
-    const onMove = (e) => {
-      if (!dragState.current.dragging) return
-      setPos(clamp(e.clientX - dragState.current.ox, e.clientY - dragState.current.oy))
-    }
-    const onUp = () => { dragState.current.dragging = false }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-  }, [clamp])
-
-  return (
-    <div onMouseDown={onMouseDown}
-      style={{ position: 'absolute', left: pos.x, top: pos.y, cursor: 'grab', userSelect: 'none' }}>
-      {children}
-    </div>
-  )
-}
+// ─── (DraggablePanel removed — replaced by bottom strip) ─────────────────────
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
@@ -536,10 +507,7 @@ export default function App() {
   const [alefMetrics, setAlefMetrics] = useState(null)
   const [params, setParams] = useState(DEFAULT_PARAMS)
   const [, forceUpdate] = useState(0)
-  const [panelReady, setPanelReady] = useState(false)
-  const [initPos, setInitPos] = useState({ x: 0, y: 0 })
   const [theme, setTheme] = useState('dark')
-  const [collapsed, setCollapsed] = useState(false)
   const [textAlign, setTextAlign] = useState('center')
   const [hasTyped, setHasTyped] = useState(false)
   const isPortrait = useIsPortrait()
@@ -549,23 +517,31 @@ export default function App() {
 
   const isDark = theme === 'dark'
   const tk = useThemeTokens(isDark)
-
-  const alefObj = useLoader(OBJLoader, '/models/1.obj')
+  const [stripWidth, setStripWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1200)
   useEffect(() => {
-    if (alefObj) {
-      const box = new THREE.Box3().setFromObject(alefObj)
+    const update = () => setStripWidth(window.innerWidth)
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [])
+
+  const alefGltf = useLoader(GLTFLoader, '/models/1.glb')
+  useEffect(() => {
+    if (alefGltf) {
+      const scene = alefGltf.scene.clone(true)
+      scene.updateWorldMatrix(true, true)
+      const box = new THREE.Box3()
+      scene.traverse(child => {
+        if (child.isMesh) {
+          const geo = child.geometry.clone()
+          geo.applyMatrix4(child.matrixWorld)
+          box.union(new THREE.Box3().setFromBufferAttribute(geo.attributes.position))
+        }
+      })
       const size = new THREE.Vector3()
       box.getSize(size)
       setAlefMetrics({ top: size.y / 2, bottom: -size.y / 2 })
     }
-  }, [alefObj])
-
-  useEffect(() => {
-    const x = Math.max(0, Math.min(window.innerWidth - PANEL_W, window.innerWidth / 2 - PANEL_W / 2))
-    const y = Math.max(0, Math.min(window.innerHeight - PANEL_H, window.innerHeight - PANEL_H - 28))
-    setInitPos({ x, y })
-    setPanelReady(true)
-  }, [])
+  }, [alefGltf])
 
   const allTokenTypes = useMemo(() => {
     const types = new Set()
@@ -748,13 +724,6 @@ export default function App() {
   const bgColor = isDark ? '#000' : '#fff'
   const arrowColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'
 
-  // Shared label style
-  const labelStyle = {
-    color: tk.textFaint, fontFamily: 'monospace', fontSize: 9,
-    letterSpacing: '0.1em', textTransform: 'uppercase', flexShrink: 0, width: 38,
-  }
-
-  // Shared value style
   const valStyle = { color: tk.text, fontFamily: 'monospace', fontSize: 11 }
 
   return (
@@ -874,192 +843,134 @@ export default function App() {
           </EffectComposer>
         </Canvas>
 
-        {/* Mobile: tap anywhere on screen to collapse panel */}
-        {isPortrait && !collapsed && (
-          <div
-            onClick={() => setCollapsed(true)}
-            style={{ position: 'absolute', inset: 0, zIndex: 4, background: 'transparent' }}
-          />
-        )}
+        {/* ── Bottom strip ── */}
+        {(() => {
+          const narrow = stripWidth < 860
 
-        {panelReady && (
-          <DraggablePanel initialPos={initPos} collapsed={collapsed}>
-            <div style={{ position: 'relative' }}>
+          const Divider = () => narrow
+            ? null
+            : <div style={{ width: 1, alignSelf: 'stretch', background: tk.divider, margin: '0 14px', flexShrink: 0 }} />
 
-              {/* ── Collapse tab — on the LEFT EDGE of the slab, vertically centered near top ── */}
-              {/* Rotated so it reads as a side tab */}
-              <div
-                data-nodrag
-                onClick={() => setCollapsed(c => !c)}
-                style={{
-                  position: 'absolute',
-                  top: 12,
-                  left: -22,            // sits flush against the left edge of the slab
-                  width: 22,
-                  height: 40,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: tk.panelBg,
-                  backdropFilter: 'blur(20px)',
-                  WebkitBackdropFilter: 'blur(20px)',
-                  border: `1px solid ${tk.panelBorder}`,
-                  borderRight: collapsed ? `1px solid ${tk.panelBorder}` : 'none',
-                  borderRadius: collapsed ? '8px' : '8px 0 0 8px',
-                  cursor: 'pointer',
-                  userSelect: 'none',
-                  zIndex: 11,
-                  transition: 'background 0.3s',
-                }}
+          const sliderLabelStyle = { ...valStyle, color: tk.textDim, fontSize: 9, width: 40, flexShrink: 0, whiteSpace: 'nowrap' }
+
+          const alignIcons = [
+            { id: 'left',    icon: <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/></svg> },
+            { id: 'center',  icon: <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="2" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/><rect x="1" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/><rect x="3" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/></svg> },
+            { id: 'right',   icon: <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="4" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/><rect x="2" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/><rect x="6" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/></svg> },
+            { id: 'justify', icon: <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="3" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="6" width="12" height="1.5" rx="0.75" fill="currentColor"/><rect x="0" y="9" width="7" height="1.5" rx="0.75" fill="currentColor"/></svg> },
+          ]
+
+          const cubeEl = (
+            <div style={{ width: 100, height: 100, position: 'relative', flexShrink: 0 }}>
+              <Canvas
+                style={{ position: 'absolute', inset: 0, background: 'transparent', cursor: 'grab' }}
+                gl={{ alpha: true }}
+                orthographic
+                camera={{ zoom: 45, position: [0, 0, 10], near: 0.1, far: 100 }}
               >
-                <svg
-                  width="8" height="12" viewBox="0 0 8 12" fill="none"
-                  style={{
-                    transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)',
-                    transition: 'transform 0.25s ease',
-                  }}
-                >
-                  {/* Chevron pointing left (←) when expanded, right (→) when collapsed */}
-                  <path d="M6 2L2 6L6 10" stroke={arrowColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </div>
-
-              {/* ── Panel slab — fully invisible when collapsed (no border, no bg) ── */}
-              <div style={{
-                width: collapsed ? 0 : PANEL_W,
-                background: collapsed ? 'transparent' : tk.panelBg,
-                backdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
-                WebkitBackdropFilter: collapsed ? 'none' : 'blur(20px) saturate(140%)',
-                border: collapsed ? 'none' : `1px solid ${tk.panelBorder}`,
-                borderRadius: 20,
-                padding: collapsed ? 0 : '14px 16px 12px',
-                // boxShadow: collapsed ? 'none' : '0 8px 40px rgba(0,0,0,0.35)',
-                overflow: 'hidden',
-                maxHeight: collapsed ? 0 : 600,
-                transition: 'max-height 0.3s ease, padding 0.3s ease, width 0.3s ease, background 0.3s, border-color 0.3s, box-shadow 0.3s',
-                position: 'relative', zIndex: 10,
-                visibility: collapsed ? 'hidden' : 'visible',
-              }}>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }} data-nodrag>
-                  <GlassSlider value={params.rotX} min={-180} max={180} onChange={set('rotX')} tk={tk} />
-                  <GlassSlider value={params.rotY} min={-180} max={180} onChange={set('rotY')} tk={tk} />
-                  <GlassSlider value={params.rotZ} min={-180} max={180} onChange={set('rotZ')} tk={tk} />
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 28 }}>
-                  <div style={{ flex: 1 }} data-nodrag>
-                    {[['X', 'rotX'], ['Y', 'rotY'], ['Z', 'rotZ']].map(([label, key]) => (
-                      <div key={key} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 0 }}>
-                        <span style={{ width: 12, ...valStyle, color: tk.textDim, fontSize: 10 }}>{label}</span>
-                        <span style={{ ...valStyle, fontSize: 10 }}>{params[key]}°</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div data-nodrag style={{ flexShrink: 0, width: 100, height: 80, position: 'relative' }}>
-                    <Canvas
-                      style={{
-                        position: 'absolute', top: '50%', left: '50%',
-                        transform: 'translate(-50%, -50%)',
-                        width: 130, height: 130,
-                        background: 'transparent', cursor: 'grab',
-                      }}
-                      gl={{ alpha: true }}
-                      orthographic
-                      camera={{ zoom: 55, position: [0, 0, 10], near: 0.1, far: 100 }}
-                    >
-                      <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} isDark={isDark} />
-                    </Canvas>
-                  </div>
-                </div>
-
-                <div style={{ borderTop: `1px solid ${tk.divider}`, paddingTop: 12, marginTop: 28, display: 'flex', flexDirection: 'column', gap: 0 }} data-nodrag>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span style={labelStyle}>Gap</span>
-                    <GlassSlider value={params.gap} min={0} max={6} step={0.05} onChange={set('gap')} tk={tk} />
-                    <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.gap.toFixed(1)}</span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span style={labelStyle}>Lead</span>
-                    <GlassSlider value={params.leading} min={4} max={20} step={0.1} onChange={set('leading')} tk={tk} />
-                    <span style={{ ...valStyle, fontSize: 9, color: tk.textDim, flexShrink: 0, width: 20, textAlign: 'right' }}>{params.leading.toFixed(1)}</span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span style={labelStyle}>Size</span>
-                    <GlassSlider value={params.size} min={0.5} max={1.5} step={0.01} onChange={set('size')} tk={tk} />
-                  </div>
-
-                  {/* Alignment buttons */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 10 }}>
-                    <span style={labelStyle}>Align</span>
-                    <div style={{ display: 'flex', gap: 4 }} data-nodrag>
-                      {[
-                        { id: 'left', icon: (
-                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
-                          </svg>
-                        )},
-                        { id: 'center', icon: (
-                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="2" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="1" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="3" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
-                          </svg>
-                        )},
-                        { id: 'right', icon: (
-                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="4" y="3" width="8" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="2" y="6" width="10" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="6" y="9" width="6" height="1.5" rx="0.75" fill="currentColor"/>
-                          </svg>
-                        )},
-                        { id: 'justify', icon: (
-                          <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                            <rect x="0" y="0" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="3" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="6" width="12" height="1.5" rx="0.75" fill="currentColor"/>
-                            <rect x="0" y="9" width="7" height="1.5" rx="0.75" fill="currentColor"/>
-                          </svg>
-                        )},
-                      ].map(({ id, icon }) => (
-                        <button
-                          key={id}
-                          onClick={() => setTextAlign(id)}
-                          style={{
-                            width: 28, height: 24,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: textAlign === id ? tk.btnBgActive : tk.btnBg,
-                            border: `1px solid ${tk.btnBorder}`,
-                            borderRadius: 5, cursor: 'pointer',
-                            color: textAlign === id ? tk.btnTextHov : tk.btnText,
-                            transition: 'all 0.15s', padding: 0,
-                          }}
-                        >{icon}</button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tk.divider}` }} data-nodrag>
-                  <PanelBtn onClick={() => { setParams(DEFAULT_PARAMS); setTextAlign('center') }} tk={tk}>Reset</PanelBtn>
-                  <PanelBtn onClick={() => { setLines([[]]); setHasTyped(false) }} tk={tk}>Clear</PanelBtn>
-                  <div style={{ flex: 1 }} />
-                  <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 7 }} data-nodrag>
-                  <span style={{ ...labelStyle, width: 'auto', marginRight: 2 }}>Theme</span>
-                  <PanelBtn onClick={() => setTheme('dark')} active={theme === 'dark'} tk={tk}>Dark</PanelBtn>
-                  <PanelBtn onClick={() => setTheme('light')} active={theme === 'light'} tk={tk}>Light</PanelBtn>
-                </div>
-
-              </div>
+                <CubeScene rotX={params.rotX} rotY={params.rotY} rotZ={params.rotZ} onRotate={handleCubeRotate} isDark={isDark} />
+              </Canvas>
             </div>
-          </DraggablePanel>
-        )}
+          )
+
+          const rotEl = (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7, ...(narrow ? { flex: 1, minWidth: 0 } : { width: 180, flexShrink: 0 }) }}>
+              {[['X', 'rotX'], ['Y', 'rotY'], ['Z', 'rotZ']].map(([label, key]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span style={sliderLabelStyle}>{label} {params[key]}°</span>
+                  <GlassSlider value={params[key]} min={-180} max={180} onChange={set(key)} tk={tk} />
+                </div>
+              ))}
+            </div>
+          )
+
+          const typoEl = (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7, ...(narrow ? { flex: 1, minWidth: 0 } : { width: 180, flexShrink: 0 }) }}>
+              {[
+                ['Gap',  'gap',     0,   6,   0.05],
+                ['Lead', 'leading', 4,   20,  0.1 ],
+                ['Size', 'size',    0.5, 1.5, 0.01],
+              ].map(([label, key, min, max, step]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span style={sliderLabelStyle}>{label}</span>
+                  <GlassSlider value={params[key]} min={min} max={max} step={step} onChange={set(key)} tk={tk} />
+                </div>
+              ))}
+            </div>
+          )
+
+          const alignEl = (
+            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+              {alignIcons.map(({ id, icon }) => (
+                <button key={id} onClick={() => setTextAlign(id)} style={{ width: 28, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: textAlign === id ? tk.btnBgActive : tk.btnBg, border: `1px solid ${tk.btnBorder}`, borderRadius: 5, cursor: 'pointer', color: textAlign === id ? tk.btnTextHov : tk.btnText, transition: 'all 0.15s', padding: 0 }}>{icon}</button>
+              ))}
+            </div>
+          )
+
+          const actionsEl = (
+            <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center' }}>
+              <PanelBtn onClick={() => { setParams(DEFAULT_PARAMS); setTextAlign('center') }} tk={tk}>Reset</PanelBtn>
+              <PanelBtn onClick={() => { setLines([[]]); setHasTyped(false) }} tk={tk}>Clear</PanelBtn>
+              <PanelBtn onClick={handlePrint} tk={tk}>Print</PanelBtn>
+              <div style={{ width: 1, alignSelf: 'stretch', background: tk.divider, margin: '0 4px', flexShrink: 0 }} />
+              <PanelBtn onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} tk={tk} fixedWidth={42}>
+                {theme === 'dark' ? 'Light' : 'Dark'}
+              </PanelBtn>
+            </div>
+          )
+
+          const stripStyle = {
+            position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)',
+            zIndex: 10,
+            background: tk.panelBg,
+            backdropFilter: 'blur(20px) saturate(140%)',
+            WebkitBackdropFilter: 'blur(20px) saturate(140%)',
+            border: `1px solid ${tk.panelBorder}`,
+            borderRadius: 20,
+            padding: '12px 16px',
+            userSelect: 'none',
+            width: narrow ? 'calc(100vw - 32px)' : 'auto',
+            boxSizing: 'border-box',
+          }
+
+          if (narrow) {
+            return (
+              <div style={{ ...stripStyle, display: 'flex', flexDirection: 'column', gap: 0 }}>
+                {/* Top row: cube + rot + typo — all fluid */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {cubeEl}
+                  <div style={{ width: 1, alignSelf: 'stretch', background: tk.divider, flexShrink: 0 }} />
+                  <div style={{ display: 'flex', gap: 12, flex: 1, minWidth: 0 }}>
+                    {rotEl}
+                    <div style={{ width: 1, alignSelf: 'stretch', background: tk.divider, flexShrink: 0 }} />
+                    {typoEl}
+                  </div>
+                </div>
+                <div style={{ height: 1, background: tk.divider, margin: '10px 0' }} />
+                {/* Bottom row: align + actions */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {alignEl}
+                  <div style={{ flex: 1 }} />
+                  {actionsEl}
+                </div>
+              </div>
+            )
+          }
+
+          return (
+            <div style={{ ...stripStyle, display: 'flex', alignItems: 'center', gap: 0 }}>
+              {cubeEl}
+              <Divider />
+              {rotEl}
+              <Divider />
+              {typoEl}
+              <Divider />
+              {alignEl}
+              <Divider />
+              {actionsEl}
+            </div>
+          )
+        })()}
       </div>
     </>
   )
