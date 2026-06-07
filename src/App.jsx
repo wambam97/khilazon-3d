@@ -581,6 +581,14 @@ export default function App() {
       'כ': '20','ך': '21','ל': '30','מ': '40','ם': '41','נ': '50','ן': '51','ס': '60','ע': '70',
       'פ': '80','ף': '81','צ': '90','ץ': '91','ק': '100','ר': '200','ש': '300','ת': '400'
     }
+    // Israeli keyboard physical layout: Latin key → model ID
+    // Allows non-Hebrew keyboard users to type without switching input language
+    const latinKeyMap = {
+      't': '1', 'c': '2', 'd': '3', 's': '4', 'v': '5', 'u': '6', 'z': '7', 'j': '8', 'y': '9',
+      'h': '10', 'f': '20', 'l': '21', 'k': '30', 'n': '40', 'o': '41', 'b': '50', 'i': '51',
+      'x': '60', 'g': '70', 'p': '80', ';': '81', 'm': '90', '.': '91', 'e': '100', 'r': '200',
+      'a': '300', ',': '400'
+    }
     const handleKeyDown = (e) => {
       // Prevent double-firing on mobile — hidden input also triggers keydown on window
       if (mobileInputRef.current && document.activeElement === mobileInputRef.current) return
@@ -595,9 +603,10 @@ export default function App() {
           }
           return [...n, []]
         })
-      } else if (keyMap[e.key]) {
+      } else if (keyMap[e.key] || latinKeyMap[e.key]) {
+        const token = keyMap[e.key] ?? latinKeyMap[e.key]
         setHasTyped(true)
-        setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push(keyMap[e.key]); return n })
+        setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push(token); return n })
       } else if (e.key === ' ') {
         e.preventDefault()
         setLines(prev => { const n = prev.map(l => [...l]); n[n.length - 1].push('space'); return n })
